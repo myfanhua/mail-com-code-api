@@ -26,6 +26,7 @@ from storage import Account, Address, Store
 
 
 EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
+CODE_URL_RE = re.compile(r"https?://[^\s]+?(/code/[A-Za-z0-9_-]+)")
 DOMAIN_RE = re.compile(
     r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$",
     re.I,
@@ -700,6 +701,25 @@ class MailCodeHandler(BaseHTTPRequestHandler):
     def app(self) -> MailCodeApplication:
         return self.server.application  # type: ignore[attr-defined]
 
+    def request_public_base(self) -> str:
+        forwarded_proto = self.headers.get("X-Forwarded-Proto", "").split(",", 1)[0].strip().lower()
+        scheme = forwarded_proto if forwarded_proto in {"http", "https"} else "http"
+        forwarded_host = self.headers.get("X-Forwarded-Host", "").split(",", 1)[0].strip()
+        host = forwarded_host or self.headers.get("Host", "").strip()
+        if not host or any(character.isspace() for character in host) or "/" in host or "\\" in host:
+            return self.app.store.public_base
+        return f"{scheme}://{host}"
+
+    def localize_code_urls(self, value: Any) -> Any:
+        base = self.request_public_base().rstrip("/")
+        if isinstance(value, str):
+            return CODE_URL_RE.sub(lambda match: f"{base}{match.group(1)}", value)
+        if isinstance(value, list):
+            return [self.localize_code_urls(item) for item in value]
+        if isinstance(value, dict):
+            return {key: self.localize_code_urls(item) for key, item in value.items()}
+        return value
+
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
         if parsed.path in {"/", "/index.html"}:
@@ -1204,6 +1224,7 @@ class MailCodeHandler(BaseHTTPRequestHandler):
         return True
 
     def json_response(self, status: int, payload: dict[str, Any]) -> None:
+        payload = self.localize_code_urls(payload)
         body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -1214,6 +1235,7 @@ class MailCodeHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def text_response(self, status: int, body_text: str) -> None:
+        body_text = self.localize_code_urls(body_text)
         body = body_text.encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "text/plain; charset=utf-8")

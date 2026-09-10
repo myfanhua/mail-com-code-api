@@ -25,7 +25,7 @@ chmod +x service.sh
 ./service.sh stop
 ```
 
-服务默认监听所有网卡的 `8988` 端口，使用 `.venv/bin/python`（不存在时使用 `python3`），自动读取项目根目录下的 `.env`，PID 保存在 `.run/server.pid`，标准输出和错误输出统一写入 `logs/server.log`。持续查看日志可运行 `./service.sh logs`。部署到服务器时应把 `MAIL_API_PUBLIC_BASE` 设置为实际域名或 `http://服务器IP:8988`。
+服务默认监听所有网卡的 `8988` 端口，使用 `.venv/bin/python`（不存在时使用 `python3`），自动读取项目根目录下的 `.env`，PID 保存在 `.run/server.pid`，标准输出和错误输出统一写入 `logs/server.log`。持续查看日志可运行 `./service.sh logs`。API 响应和网页中生成的取码地址会自动使用当前请求的协议、服务器地址和端口；经过反向代理时支持 `X-Forwarded-Proto` 和 `X-Forwarded-Host`。
 
 Windows PowerShell 也可以直接启动：
 

@@ -29,6 +29,35 @@ function notify(message, error = false) {
   setTimeout(() => toast.classList.remove('show'), 2800);
 }
 
+async function copyText(text) {
+  if (navigator.clipboard?.writeText && window.isSecureContext) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {}
+  }
+
+  const textarea = document.createElement('textarea');
+  textarea.value = text;
+  textarea.setAttribute('readonly', '');
+  textarea.style.position = 'fixed';
+  textarea.style.left = '-9999px';
+  textarea.style.top = '0';
+  document.body.appendChild(textarea);
+  textarea.focus();
+  textarea.select();
+  textarea.setSelectionRange(0, textarea.value.length);
+  let copied = false;
+  try {
+    copied = document.execCommand('copy');
+  } catch {}
+  textarea.remove();
+  if (!copied) {
+    window.prompt('浏览器无法自动复制，请手动复制以下内容：', text);
+  }
+  return copied;
+}
+
 async function request(path, options = {}) {
   const headers = new Headers(options.headers || {});
   if (adminToken) headers.set('Authorization', `Bearer ${adminToken}`);
@@ -109,7 +138,7 @@ function renderMotherAccounts(accounts) {
       </details>`;
   }).join('');
   container.querySelectorAll('.copy-child').forEach(button => button.addEventListener('click', async () => {
-    await navigator.clipboard.writeText(`${button.dataset.address}----${button.dataset.url}`);
+    if (!await copyText(`${button.dataset.address}----${button.dataset.url}`)) return;
     notify('子号和取码地址已复制');
   }));
   container.querySelectorAll('.copy-mother-group').forEach(button => button.addEventListener('click', async event => {
@@ -118,7 +147,7 @@ function renderMotherAccounts(accounts) {
     const account = motherAccounts.find(item => String(item.id) === button.dataset.accountId);
     const lines = (account?.addresses || []).map(route => `${route.address}----${route.url}`);
     if (!lines.length) return notify('该母号没有可复制的取码地址', true);
-    await navigator.clipboard.writeText(lines.join('\n'));
+    if (!await copyText(lines.join('\n'))) return;
     notify(`已复制该母号及其 ${Math.max(0, lines.length - 1)} 个子号`);
   }));
   const childCount = accounts.reduce(
@@ -280,7 +309,7 @@ function renderAccounts(accounts) {
       <td>${route ? `<button class="copy" data-address="${escapeHtml(route.address)}" data-url="${escapeHtml(route.url)}">复制</button>` : '—'}</td>
     </tr>`).join('');
   accountsBody.querySelectorAll('.copy').forEach(button => button.addEventListener('click', async () => {
-    await navigator.clipboard.writeText(`${button.dataset.address}----${button.dataset.url}`);
+    if (!await copyText(`${button.dataset.address}----${button.dataset.url}`)) return;
     notify('邮箱和取码地址已复制');
   }));
   document.querySelector('#address-select-all').checked = false;
@@ -303,7 +332,7 @@ function renderAddressRows(rows) {
       <td><button class="copy copy-address" data-address="${escapeHtml(route.address)}" data-url="${escapeHtml(route.url)}">复制</button></td>
     </tr>`).join('');
   accountsBody.querySelectorAll('.copy-address').forEach(button => button.addEventListener('click', async () => {
-    await navigator.clipboard.writeText(`${button.dataset.address}----${button.dataset.url}`);
+    if (!await copyText(`${button.dataset.address}----${button.dataset.url}`)) return;
     notify('邮箱和取码地址已复制');
   }));
   document.querySelector('#address-select-all').checked = false;
@@ -618,7 +647,7 @@ document.querySelector('#import').addEventListener('click', async () => {
 });
 
 document.querySelector('#copy-result').addEventListener('click', async () => {
-  await navigator.clipboard.writeText(document.querySelector('#import-result').value);
+  if (!await copyText(document.querySelector('#import-result').value)) return;
   notify('邮箱----接码API 已复制');
 });
 
@@ -687,7 +716,7 @@ document.querySelector('#copy-routes').addEventListener('click', async () => {
   const lines = [...accountsBody.querySelectorAll('.address-select:checked')]
     .map(checkbox => `${checkbox.dataset.address}----${checkbox.dataset.url}`);
   if (!lines.length) return notify('请先勾选需要复制的接码地址', true);
-  await navigator.clipboard.writeText(lines.join('\n'));
+  if (!await copyText(lines.join('\n'))) return;
   notify(`已复制 ${lines.length} 条勾选地址`);
 });
 
@@ -701,7 +730,7 @@ document.querySelector('#copy-mother-routes').addEventListener('click', async ()
   const lines = motherAccounts.flatMap(account => (account.addresses || [])
     .map(route => `${route.address}----${route.url}`));
   if (!lines.length) return notify('当前页没有可复制的母号或子号', true);
-  await navigator.clipboard.writeText(lines.join('\n'));
+  if (!await copyText(lines.join('\n'))) return;
   notify(`已复制当前页 ${lines.length} 条母号和子号地址`);
 });
 
