@@ -774,6 +774,70 @@ class SplitAliasTests(unittest.TestCase):
             self.assertEqual(len(routes), 3)
             self.assertTrue(all(route.address.endswith("@comic.com") for route in routes))
 
+    def test_split_aliases_randomizes_requested_domains_after_exclusions(self):
+        class FakeSplitApplication(MailCodeApplication):
+            def add_alias(self, account, address, *, verify_visible=True, validate=True):
+                return self.store.add_address(account.id, address)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(Path(tmp), "https://codes.example")
+            app = FakeSplitApplication(store, "admin-token")
+            route = store.upsert_account("longusername@mail.com", "secret")
+            account = store.get_account(route.account_id)
+
+            routes = app.split_aliases(
+                account,
+                3,
+                domain="engineer.com,comic.com,email.com",
+                exclude_domains="engineer.com,email.com",
+            )
+
+            self.assertTrue(all(item.address.endswith("@comic.com") for item in routes))
+
+    def test_split_aliases_excludes_domains_from_random_tld_pool(self):
+        class FakeSplitApplication(MailCodeApplication):
+            def list_alias_domains(self, account):
+                return ["email.com", "engineer.com", "null.net"]
+
+            def add_alias(self, account, address, *, verify_visible=True, validate=True):
+                return self.store.add_address(account.id, address)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(Path(tmp), "https://codes.example")
+            app = FakeSplitApplication(store, "admin-token")
+            route = store.upsert_account("longusername@mail.com", "secret")
+            account = store.get_account(route.account_id)
+
+            routes = app.split_aliases(
+                account,
+                3,
+                random_domain_tlds=["com"],
+                exclude_domains=["email.com"],
+            )
+
+            self.assertTrue(all(item.address.endswith("@engineer.com") for item in routes))
+
+    def test_split_aliases_reuses_session_refreshed_by_previous_alias(self):
+        seen_sessions = []
+
+        class FakeSplitApplication(MailCodeApplication):
+            def add_alias(self, account, address, *, verify_visible=True, validate=True):
+                seen_sessions.append(account.session.get("sid", ""))
+                self.store.update_session(
+                    account.id, {"sid": f"fresh-{len(seen_sessions)}"}
+                )
+                return self.store.add_address(account.id, address)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(Path(tmp), "https://codes.example")
+            app = FakeSplitApplication(store, "admin-token")
+            route = store.upsert_account("longusername@mail.com", "secret")
+            account = store.get_account(route.account_id)
+
+            app.split_aliases(account, 3, domain="engineer.com")
+
+            self.assertEqual(seen_sessions, ["", "fresh-1", "fresh-2"])
+
     def test_split_aliases_uses_random_domain_tld(self):
         class FakeSplitApplication(MailCodeApplication):
             def list_alias_domains(self, account):

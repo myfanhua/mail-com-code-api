@@ -4,6 +4,7 @@ const accountsStorageKey = 'mail-code-accounts';
 const routesStorageKey = 'mail-code-routes';
 const adminTokenStorageKey = 'mail-code-admin-token';
 const splitDomainStorageKey = 'mail-code-split-domains';
+const splitExcludeDomainStorageKey = 'mail-code-split-exclude-domains';
 let savedAccounts = readSavedAccounts();
 let motherAccounts = [];
 let addressRows = [];
@@ -19,6 +20,7 @@ const proxyPoolInput = document.querySelector('#proxy-pool-input');
 const proxyPoolStatus = document.querySelector('#proxy-pool-status');
 const splitProgress = document.querySelector('#split-progress');
 const splitDomainInput = document.querySelector('#import-split-domain');
+const splitExcludeDomainInput = document.querySelector('#import-exclude-domains');
 let healthPollingTimer = null;
 let healthPollingInFlight = false;
 
@@ -165,12 +167,29 @@ function renderMotherAccounts(accounts) {
     const count = Number(rawCount);
     if (!Number.isInteger(count) || count < 1 || count > 9) return notify('分裂数量必须是 1-9', true);
     const cachedDomains = localStorage.getItem(splitDomainStorageKey) || '';
-    const domain = window.prompt('指定域名（可留空沿用母号域名，多个用逗号分隔）：', cachedDomains);
+    const domain = window.prompt('指定域名（多个域名会随机选择；留空则下一步选择随机 .com/.net）：', cachedDomains);
     if (domain === null) return;
+    let randomDomainTlds = [];
+    if (!domain.trim()) {
+      const rawTlds = window.prompt('随机域名后缀：输入 com、net 或 com,net：', 'com,net');
+      if (rawTlds === null) return;
+      randomDomainTlds = [...new Set(rawTlds.toLowerCase().split(/[\s,，]+/).map(value => value.replace(/^\./, '')).filter(Boolean))];
+      if (!randomDomainTlds.length || randomDomainTlds.some(value => !['com', 'net'].includes(value))) {
+        return notify('随机域名后缀只能填写 com、net 或 com,net', true);
+      }
+    }
+    const cachedExcludes = localStorage.getItem(splitExcludeDomainStorageKey) || '';
+    const excludeDomains = window.prompt('排除域名（可留空，多个用逗号分隔）：', cachedExcludes);
+    if (excludeDomains === null) return;
     if (domain.trim()) {
       splitDomainInput.value = domain.trim();
       saveSplitDomains();
+    } else {
+      splitDomainInput.value = '';
+      saveSplitDomains();
     }
+    splitExcludeDomainInput.value = excludeDomains.trim();
+    saveSplitExcludeDomains();
     button.disabled = true;
     try {
       const result = await request('/admin/aliases/split', {
@@ -181,6 +200,8 @@ function renderMotherAccounts(accounts) {
           password: account.password,
           count,
           ...(domain.trim() ? {domain: domain.trim()} : {}),
+          ...(randomDomainTlds.length ? {random_domain_tlds: randomDomainTlds} : {}),
+          ...(excludeDomains.trim() ? {exclude_domains: excludeDomains.trim()} : {}),
         }),
       });
       motherPage = 1;
@@ -306,6 +327,12 @@ function saveSplitDomains() {
   const value = splitDomainInput.value.trim();
   if (value) localStorage.setItem(splitDomainStorageKey, value);
   else localStorage.removeItem(splitDomainStorageKey);
+}
+
+function saveSplitExcludeDomains() {
+  const value = splitExcludeDomainInput.value.trim();
+  if (value) localStorage.setItem(splitExcludeDomainStorageKey, value);
+  else localStorage.removeItem(splitExcludeDomainStorageKey);
 }
 
 function parseCredentialLines(text) {
@@ -616,7 +643,9 @@ document.querySelector('#import').addEventListener('click', async () => {
   const useProxy = document.querySelector('#use-proxy').checked;
   const splitCount = Number(document.querySelector('#import-split-count').value || 0);
   const splitDomain = splitDomainInput.value.trim();
+  const excludeDomains = splitExcludeDomainInput.value.trim();
   saveSplitDomains();
+  saveSplitExcludeDomains();
   const randomDomainTlds = [
     document.querySelector('#random-com-domain').checked ? 'com' : '',
     document.querySelector('#random-net-domain').checked ? 'net' : '',
@@ -667,6 +696,7 @@ document.querySelector('#import').addEventListener('click', async () => {
               count: splitCount,
               ...(splitDomain ? {domain: splitDomain} : {}),
               ...(randomDomainTlds.length ? {random_domain_tlds: randomDomainTlds} : {}),
+              ...(excludeDomains ? {exclude_domains: excludeDomains} : {}),
             }),
           });
           const splitRoutes = (split.routes || []).map(route => ({address: route.address, url: route.url}));
@@ -833,6 +863,9 @@ document.querySelector('#admin-token').addEventListener('keydown', event => {
 splitDomainInput.value = localStorage.getItem(splitDomainStorageKey) || '';
 splitDomainInput.addEventListener('change', saveSplitDomains);
 splitDomainInput.addEventListener('blur', saveSplitDomains);
+splitExcludeDomainInput.value = localStorage.getItem(splitExcludeDomainStorageKey) || '';
+splitExcludeDomainInput.addEventListener('change', saveSplitExcludeDomains);
+splitExcludeDomainInput.addEventListener('blur', saveSplitExcludeDomains);
 
 setAdminAuthenticated(false);
 if (adminToken) {

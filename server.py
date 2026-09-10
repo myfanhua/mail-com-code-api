@@ -622,6 +622,7 @@ class MailCodeApplication:
         prefix: str | None = None,
         domain: str | None = None,
         random_domain_tlds: list[str] | None = None,
+        exclude_domains: Any = None,
     ) -> list[Address]:
         count = max(1, min(int(count), MAX_SPLIT_ALIASES))
         current_address_count = len(self.store.list_addresses_for_account(account.id))
@@ -634,19 +635,45 @@ class MailCodeApplication:
             )
         count = min(count, remaining)
         _local, account_domain = account.email.rsplit("@", 1)
-        alias_domains = tuple(parse_split_domains(domain))
+        excluded_domains = set(parse_split_domains(exclude_domains))
+        requested_alias_domains = parse_split_domains(domain)
+        alias_domains = tuple(
+            candidate
+            for candidate in requested_alias_domains
+            if candidate not in excluded_domains
+        )
+        if requested_alias_domains and not alias_domains:
+            raise MailComError(
+                "指定域名已全部被排除，没有可用于分裂的域名",
+                kind="no_alias_domain",
+                status=400,
+            )
         random_domains: tuple[str, ...] = ()
         if random_domain_tlds and not alias_domains:
             upstream_domains = self.list_alias_domains(account)
-            random_domains = tuple(
-                domain
+            # list_alias_domains 会刷新并保存会话，后续创建别名应继续使用
+            # 最新状态，不能反复拿调用开始时的旧 sid 登录。
+            account = self.store.get_account(account.id) or account
+            tld_domains = tuple(dict.fromkeys(
+                candidate
                 for tld in random_domain_tlds
-                for domain in upstream_domains
-                if domain.endswith(f".{tld}")
-            )
+                for candidate in upstream_domains
+                if candidate.endswith(f".{tld}")
+            ))
+            random_domains = tuple(dict.fromkeys(
+                candidate
+                for candidate in tld_domains
+                if candidate not in excluded_domains
+            ))
             if not random_domains:
+                if tld_domains and excluded_domains:
+                    raise MailComError(
+                        "随机域名已全部被排除，没有可用于分裂的域名",
+                        kind="no_alias_domain",
+                        status=400,
+                    )
                 raise MailComError(
-                    f"mail.com 未返回可用的随机 {', '.join('.' + tld for tld in random_domain_tlds)} 别名域名",
+                    f"mail.com 未返回未被排除的随机 {', '.join('.' + tld for tld in random_domain_tlds)} 别名域名",
                     kind="settings_failed",
                     status=502,
                 )
@@ -687,6 +714,9 @@ class MailCodeApplication:
                 selected_domain = account_domain
             address = f"{alias_local}@{selected_domain}"
             routes.append(self.add_alias(account, address, verify_visible=False, validate=False))
+            # add_alias 已把最新 token/cookie 写入数据库。下一轮必须重新读取，
+            # 否则一次分裂多个子号会为每个子号重复刷新同一份旧会话。
+            account = self.store.get_account(account.id) or account
         return routes
 
     def fetch_code(
@@ -1031,12 +1061,14 @@ class MailCodeHandler(BaseHTTPRequestHandler):
                 count = None
                 domain = None
                 random_domain_tlds = None
+                exclude_domains = None
                 if isinstance(payload, dict):
                     email = str(payload.get("email") or "").strip().lower()
                     count = payload.get("count", 1)
                     domain = payload.get("domain") or None
                     raw_tlds = payload.get("random_domain_tlds", payload.get("random_tlds", []))
                     random_domain_tlds = raw_tlds if raw_tlds else None
+                    exclude_domains = payload.get("exclude_domains") or None
                 log_api_event(
                     "split_invalid",
                     method=self.command,
@@ -1045,6 +1077,7 @@ class MailCodeHandler(BaseHTTPRequestHandler):
                     count=count,
                     domain=domain,
                     random_domain_tlds=random_domain_tlds,
+                    exclude_domains=exclude_domains,
                     status=400,
                     error="invalid_request",
                     detail=str(exc),
@@ -1055,6 +1088,7 @@ class MailCodeHandler(BaseHTTPRequestHandler):
                 count = None
                 domain = None
                 random_domain_tlds = None
+                exclude_domains = None
                 if isinstance(payload, dict):
                     email = str(payload.get("email") or "").strip().lower()
                     try:
@@ -1063,6 +1097,7 @@ class MailCodeHandler(BaseHTTPRequestHandler):
                         count = payload.get("count")
                     domain = payload.get("domain") or None
                     random_domain_tlds = parse_random_domain_tlds(payload)
+                    exclude_domains = payload.get("exclude_domains") or None
                 log_api_event(
                     "split_failed",
                     method=self.command,
@@ -1071,6 +1106,7 @@ class MailCodeHandler(BaseHTTPRequestHandler):
                     count=count,
                     domain=domain,
                     random_domain_tlds=random_domain_tlds,
+                    exclude_domains=exclude_domains,
                     status=exc.status,
                     error=exc.kind,
                     detail=str(exc),
@@ -1164,6 +1200,7 @@ class MailCodeHandler(BaseHTTPRequestHandler):
         prefix = str(payload.get("prefix") or "").strip().lower() or None
         domain = payload.get("domain")
         random_domain_tlds = parse_random_domain_tlds(payload)
+        exclude_domains = payload.get("exclude_domains")
         try:
             count = int(payload.get("count", 1))
         except (TypeError, ValueError) as exc:
@@ -1180,6 +1217,7 @@ class MailCodeHandler(BaseHTTPRequestHandler):
             prefix=prefix,
             domain=domain,
             random_domain_tlds=random_domain_tlds,
+            exclude_domains=exclude_domains,
         )
         self.json_response(
             201,
@@ -1188,6 +1226,7 @@ class MailCodeHandler(BaseHTTPRequestHandler):
                 "prefix": prefix or None,
                 "domain": parse_split_domains(domain) or None,
                 "random_domain_tlds": random_domain_tlds,
+                "exclude_domains": parse_split_domains(exclude_domains) or None,
                 "created": len(routes),
                 "routes": [
                     {"address": route.address, "url": self.app.store.code_url(route.access_key)}

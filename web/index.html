@@ -54,9 +54,10 @@
           <label><input id="verify" type="checkbox" checked> 导入后立即验证 mail.com 登录</label>
           <label><input id="use-proxy" type="checkbox"> 使用代理</label>
           <label>每个账号分裂 <select id="import-split-count" aria-label="每个账号分裂数量"><option value="0">不分裂</option><option value="1">1 个</option><option value="2">2 个</option><option value="3">3 个</option><option value="4">4 个</option><option value="5">5 个</option><option value="6">6 个</option><option value="7">7 个</option><option value="8">8 个</option><option value="9">9 个</option></select></label>
-          <label>指定域名 <input id="import-split-domain" type="text" placeholder="engineer.com, comic.com" aria-label="指定分裂域名（可选，可输入多个）" title="自动保存在当前浏览器，下次导入时继续使用"></label>
+          <label>指定/随机域名 <input id="import-split-domain" type="text" placeholder="engineer.com, comic.com" aria-label="指定分裂域名（多个域名时随机选择）" title="输入多个域名时随机选择；自动保存在当前浏览器"></label>
           <label><input id="random-com-domain" type="checkbox"> 随机 .com 域名</label>
           <label><input id="random-net-domain" type="checkbox"> 随机 .net 域名</label>
+          <label>排除域名 <input id="import-exclude-domains" type="text" placeholder="email.com, usa.com" aria-label="随机分裂时排除的域名" title="多个域名用逗号分隔，自动保存在当前浏览器"></label>
         </div>
         <div class="inline-actions">
           <button id="import" class="button primary">保存并导入</button>

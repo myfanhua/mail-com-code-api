@@ -200,13 +200,19 @@ HTTP 指纹由 `curl_cffi` 的 `MAIL_HTTP_IMPERSONATE` 统一生成。默认不�
 ```
 
 `domain` 可选；不传时默认沿用账号邮箱域名。子号名称默认随机组合常见英文名、姓氏、排列方式和数字，不包含母号前缀或固定的 `split` 标记，更接近真人邮箱格式。传入 `engineer.com` 时只固定域名部分，子号名称仍然随机生成。
+`domain` 也可以传多个域名，服务会为每个子号随机选择一个，并可通过 `exclude_domains` 排除不需要的域名：
+
+```json
+{"email":"first@mail.com","password":"password-1","count":3,"domain":"engineer.com,comic.com,email.com","exclude_domains":"email.com"}
+```
+
 如果同时传 `domain` 和随机域名参数，优先使用手动指定的 `domain`。
 mail.com 当前按账号总地址数限制，上限约为 10 个；因为原始邮箱本身也占 1 个，所以通常最多还能新建 9 个别名。
 
 随机从 mail.com 域名池中选择 `.com` 或 `.net` 域名：
 
 ```json
-{"email":"first@mail.com","password":"password-1","count":9,"random_domain_tlds":["com","net"]}
+{"email":"first@mail.com","password":"password-1","count":9,"random_domain_tlds":["com","net"],"exclude_domains":["email.com","usa.com"]}
 ```
 
 也兼容布尔参数：
