@@ -26,6 +26,7 @@ from storage import Account, Address, Store
 
 
 EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
+EMAIL_FIND_RE = re.compile(r"[A-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Z0-9.-]+\.[A-Z]{2,63}", re.I)
 CODE_URL_RE = re.compile(r"https?://[^\s]+?(/code/[A-Za-z0-9_-]+)")
 DOMAIN_RE = re.compile(
     r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$",
@@ -225,6 +226,22 @@ def log_api_event(event: str, **fields: Any) -> None:
         "mail-code-api "
         + json.dumps({"event": event, **fields}, ensure_ascii=False, separators=(",", ":")),
         file=sys.stderr,
+    )
+
+
+def redact_log_text(value: Any, limit: int = 180) -> str:
+    """保留排障所需文本，但不把验证码写入服务日志。"""
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    text = re.sub(r"(?<!\d)\d{4,8}(?!\d)", "[code]", text)
+    return text[:limit]
+
+
+def message_matches_recipient(recipients: list[str], address: str) -> bool:
+    expected = address.strip().lower()
+    return any(
+        candidate.lower() == expected
+        for recipient in recipients
+        for candidate in EMAIL_FIND_RE.findall(str(recipient or ""))
     )
 
 
@@ -678,24 +695,134 @@ class MailCodeApplication:
         sender: str = "",
         since: float | None = None,
         max_age: int = 600,
+        trace_id: str = "",
+        poll_attempt: int = 1,
     ) -> dict[str, Any] | None:
+        trace_id = trace_id or secrets.token_hex(6)
+        started = time.monotonic()
+        log_api_event(
+            "code_fetch_started",
+            trace_id=trace_id,
+            poll_attempt=poll_attempt,
+            account=account.email,
+            address=route.address,
+            email_type="母号" if route.is_primary else "子号",
+            sender_filter=redact_log_text(sender),
+            since=since,
+            max_age=max_age,
+            proxy_bound=bool(account.proxy_url),
+        )
         with self.account_lock(account.id):
             client = self.client_for(account)
             try:
-                messages = client.query_messages(route.address, amount=20)
+                # mail.com 的条件搜索有索引延迟：刚收到的邮件可能在网页和完整收件箱中
+                # 已可见，但按收件人搜索仍返回旧结果。因此分别读取最新收件箱与
+                # 条件搜索结果，再在本地按完整收件地址严格过滤并合并去重。
+                query_errors: list[MailComError] = []
+                try:
+                    newest_messages = client.query_messages("", amount=50)
+                except MailComError as exc:
+                    newest_messages = []
+                    query_errors.append(exc)
+                    log_api_event(
+                        "code_mail_list_query_failed",
+                        trace_id=trace_id,
+                        poll_attempt=poll_attempt,
+                        query="newest_inbox",
+                        error=exc.kind,
+                        status=exc.status,
+                        detail=redact_log_text(exc),
+                    )
+                try:
+                    filtered_messages = client.query_messages(route.address, amount=50)
+                except MailComError as exc:
+                    filtered_messages = []
+                    query_errors.append(exc)
+                    log_api_event(
+                        "code_mail_list_query_failed",
+                        trace_id=trace_id,
+                        poll_attempt=poll_attempt,
+                        query="recipient_filter",
+                        error=exc.kind,
+                        status=exc.status,
+                        detail=redact_log_text(exc),
+                    )
+                if len(query_errors) == 2:
+                    raise query_errors[-1]
+                filtered_ids = {message.mail_id for message in filtered_messages}
+                messages_by_id = {
+                    message.mail_id: message
+                    for message in (*newest_messages, *filtered_messages)
+                }
+                messages = sorted(
+                    messages_by_id.values(), key=lambda message: message.date_ms, reverse=True
+                )
+                log_api_event(
+                    "code_mail_list_loaded",
+                    trace_id=trace_id,
+                    poll_attempt=poll_attempt,
+                    address=route.address,
+                    newest_count=len(newest_messages),
+                    filtered_count=len(filtered_messages),
+                    merged_count=len(messages),
+                )
                 now = time.time()
-                for message in messages[:10]:
+                for index, message in enumerate(messages[:50], 1):
                     message_time = message.date_ms / 1000 if message.date_ms > 10_000_000_000 else float(message.date_ms)
+                    exact_recipient = message_matches_recipient(message.recipients, route.address)
+                    # 某些 mail.com 列表项不返回 To 头；仅当它确实来自按该地址查询的
+                    # 结果时才允许继续，避免不同子号之间串码。
+                    recipient_match = exact_recipient or (
+                        not message.recipients and message.mail_id in filtered_ids
+                    )
+                    skip_reason = ""
+                    if not recipient_match:
+                        skip_reason = "recipient_mismatch"
                     if since is not None and message_time and message_time < since:
-                        continue
+                        skip_reason = skip_reason or "before_since"
                     if max_age > 0 and message_time and message_time < now - max_age:
-                        continue
+                        skip_reason = skip_reason or "older_than_max_age"
                     if sender and sender.lower() not in message.sender.lower():
+                        skip_reason = skip_reason or "sender_mismatch"
+                    log_api_event(
+                        "code_mail_candidate",
+                        trace_id=trace_id,
+                        poll_attempt=poll_attempt,
+                        index=index,
+                        mail_id=redact_log_text(message.mail_id, 100),
+                        date_ms=message.date_ms,
+                        age_seconds=round(max(0, now - message_time), 3) if message_time else None,
+                        sender=redact_log_text(message.sender),
+                        recipients=[redact_log_text(value) for value in message.recipients[:5]],
+                        subject=redact_log_text(message.subject),
+                        exact_recipient=exact_recipient,
+                        in_filtered_result=message.mail_id in filtered_ids,
+                        decision="skip" if skip_reason else "inspect_body",
+                        reason=skip_reason or None,
+                    )
+                    if skip_reason:
                         continue
                     body = client.get_body(message.mail_id)
                     code = extract_code(message.subject, body)
+                    log_api_event(
+                        "code_body_checked",
+                        trace_id=trace_id,
+                        poll_attempt=poll_attempt,
+                        mail_id=redact_log_text(message.mail_id, 100),
+                        body_chars=len(body),
+                        code_found=bool(code),
+                        code_length=len(code) if code else 0,
+                    )
                     if code:
                         self.store.update_session(account.id, client.export_state(), status="ready")
+                        log_api_event(
+                            "code_fetch_succeeded",
+                            trace_id=trace_id,
+                            poll_attempt=poll_attempt,
+                            address=route.address,
+                            mail_id=redact_log_text(message.mail_id, 100),
+                            elapsed_ms=round((time.monotonic() - started) * 1000),
+                        )
                         return {
                             "email": route.address,
                             "code": code,
@@ -709,9 +836,27 @@ class MailCodeApplication:
                             },
                         }
                 self.store.update_session(account.id, client.export_state(), status="ready")
+                log_api_event(
+                    "code_fetch_empty",
+                    trace_id=trace_id,
+                    poll_attempt=poll_attempt,
+                    address=route.address,
+                    inspected_count=min(50, len(messages)),
+                    elapsed_ms=round((time.monotonic() - started) * 1000),
+                )
                 return None
             except MailComError as exc:
                 self.store.update_status(account.id, exc.kind, str(exc))
+                log_api_event(
+                    "code_fetch_failed",
+                    trace_id=trace_id,
+                    poll_attempt=poll_attempt,
+                    address=route.address,
+                    status=exc.status,
+                    error=exc.kind,
+                    detail=redact_log_text(exc),
+                    elapsed_ms=round((time.monotonic() - started) * 1000),
+                )
                 raise
 
 
@@ -1195,12 +1340,19 @@ class MailCodeHandler(BaseHTTPRequestHandler):
         self.json_response(200, {"count": len(results), "results": results})
 
     def handle_code(self, parsed) -> None:
+        trace_id = secrets.token_hex(6)
         key = parsed.path.removeprefix("/code/").strip("/")
         if not key or not self.app.rate_limiter.allow(key):
+            log_api_event(
+                "code_request_rejected",
+                trace_id=trace_id,
+                reason="rate_limited" if key else "missing_key",
+            )
             self.json_response(429 if key else 404, {"error": "rate_limited" if key else "not_found"})
             return
         found = self.app.store.get_by_key(key)
         if not found:
+            log_api_event("code_request_rejected", trace_id=trace_id, reason="unknown_mailbox")
             self.json_response(404, {"error": "unknown_mailbox"})
             return
         account, route = found
@@ -1214,19 +1366,62 @@ class MailCodeHandler(BaseHTTPRequestHandler):
             return
         sender = (params.get("sender") or [""])[0]
         deadline = time.monotonic() + wait_seconds
+        log_api_event(
+            "code_request_started",
+            trace_id=trace_id,
+            account=account.email,
+            address=route.address,
+            wait=wait_seconds,
+            max_age=max_age,
+            since=since,
+            sender_filter=redact_log_text(sender),
+        )
+        poll_attempt = 0
         try:
             while True:
+                poll_attempt += 1
                 result = self.app.fetch_code(
-                    account, route, sender=sender, since=since, max_age=max_age
+                    account,
+                    route,
+                    sender=sender,
+                    since=since,
+                    max_age=max_age,
+                    trace_id=trace_id,
+                    poll_attempt=poll_attempt,
                 )
                 if result:
+                    log_api_event(
+                        "code_request_finished",
+                        trace_id=trace_id,
+                        address=route.address,
+                        result="code_found",
+                        poll_attempts=poll_attempt,
+                        status=200,
+                    )
                     self.json_response(200, result)
                     return
                 if time.monotonic() >= deadline:
+                    log_api_event(
+                        "code_request_finished",
+                        trace_id=trace_id,
+                        address=route.address,
+                        result="no_code",
+                        poll_attempts=poll_attempt,
+                        status=200,
+                    )
                     self.json_response(200, {"email": route.address, "code": None, "mail": None})
                     return
                 time.sleep(min(5, max(0.1, deadline - time.monotonic())))
         except MailComError as exc:
+            log_api_event(
+                "code_request_finished",
+                trace_id=trace_id,
+                address=route.address,
+                result="error",
+                poll_attempts=poll_attempt,
+                status=exc.status,
+                error=exc.kind,
+            )
             self.json_response(exc.status, {"email": route.address, "code": None, "error": exc.kind})
 
     def find_account(self, value: Any) -> Account:

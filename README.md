@@ -11,7 +11,7 @@
 5. 服务按收件地址、时间和可选发件人筛选，读取正文并提取 4 至 8 位验证码。
 6. 地址永久保存到 SQLite，并同步生成 `data/邮箱----接码API.txt`。
 
-密码、代理凭据、`sid`、access token 均使用 Fernet 加密后写入数据库；日志不记录 URL、邮箱、密码、代理密码或 token。
+密码、代理凭据、`sid`、access token 均使用 Fernet 加密后写入数据库。取码排障日志会记录母号/子号、邮件元数据和过滤原因，但不会记录取码 URL、access key、密码、代理凭据、token、邮件正文或实际验证码；主题中的 4 至 8 位数字会自动脱敏。
 
 ## 本地启动
 
@@ -115,6 +115,23 @@ curl 'https://mail-code.example.com/code/<access_key>'
 ```json
 {"email":"first@mail.com","code":null,"mail":null}
 ```
+
+### 取码日志排查
+
+取码时会同时读取最新 50 封收件箱邮件和 mail.com 按收件地址搜索的结果，合并去重后再按完整收件地址严格过滤。这可以绕过 mail.com 搜索索引延迟，同时防止同一母号下不同子号串码。查看实时日志：
+
+```bash
+./service.sh logs
+```
+
+同一次请求使用相同的 `trace_id`，主要事件包括：
+
+- `code_request_started`：取码参数。
+- `code_mail_list_loaded`：最新收件箱、地址搜索及合并后的邮件数量。
+- `code_mail_candidate`：每封候选邮件的时间、收件人和跳过原因。
+- `code_body_checked`：是否从正文识别到验证码，不记录正文和验证码内容。
+- `code_fetch_empty` / `code_fetch_failed`：未取到或上游请求失败的具体阶段。
+- `code_request_finished`：最终结果和轮询次数。
 
 ## 导入与验证
 

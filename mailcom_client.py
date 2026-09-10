@@ -289,7 +289,7 @@ class MailComClient:
         # mail.com 的旧邮件列表缓存，导致第二封验证码邮件暂时不可见。
         return f"{self.auth_id}-{time.time_ns()}"
 
-    def query_messages(self, recipient: str, *, amount: int = 20) -> list[MailMessage]:
+    def query_messages(self, recipient: str = "", *, amount: int = 20) -> list[MailMessage]:
         token = self.ensure_mail_token()
         params: dict[str, Any] = {
             "folderTypeOrId": "INBOX",
@@ -297,8 +297,10 @@ class MailComClient:
             "amount": str(max(1, min(amount, 50))),
             "orderBy": "INTERNALDATE DESC",
             "no_cache": self._cache_buster(),
-            "condition": f"mail.header:subject,to,from,cc:{recipient}",
         }
+        recipient = recipient.strip().lower()
+        if recipient:
+            params["condition"] = f"mail.header:subject,to,from,cc:{recipient}"
         try:
             response = self.session.post(
                 MAIL_LIST_URL, params=params, data=b"", headers=self._mail_headers(token), timeout=self.timeout

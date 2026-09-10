@@ -14,12 +14,13 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from code_extract import extract_code  # noqa: E402
-from mailcom_client import MailComClient, MailComError  # noqa: E402
+from mailcom_client import MailComClient, MailComError, MailMessage  # noqa: E402
 from server import (
     MailCodeApplication,
     MailCodeHandler,
     load_proxy_pool,
     log_api_event,
+    message_matches_recipient,
     normalize_mailcom_domain,
     parse_split_domains,
     parse_random_domain_tlds,
@@ -31,6 +32,7 @@ from server import (
     parse_email_list,
     parse_pagination,
     parse_timestamp,
+    redact_log_text,
 )  # noqa: E402
 from storage import Address, Store  # noqa: E402
 
@@ -149,10 +151,29 @@ class ParsingTests(unittest.TestCase):
         self.assertEqual(payload["email"], "user@mail.com")
         self.assertEqual(payload["error"], "alias_limit")
 
+    def test_diagnostic_log_text_redacts_verification_codes(self):
+        self.assertEqual(
+            redact_log_text("Your verification code is 482913"),
+            "Your verification code is [code]",
+        )
+
     def test_batch_email_query_input(self):
         self.assertEqual(
             parse_email_list({"text": "A@mail.com\nb@mail.com,a@mail.com"}),
             ["a@mail.com", "b@mail.com"],
+        )
+
+    def test_recipient_matching_uses_complete_email_address(self):
+        self.assertTrue(
+            message_matches_recipient(
+                ["Recipient Name <Child.One@Engineer.com>"],
+                "child.one@engineer.com",
+            )
+        )
+        self.assertFalse(
+            message_matches_recipient(
+                ["other-child@engineer.com"], "child@engineer.com"
+            )
         )
 
     def test_timestamp_seconds_milliseconds_and_iso(self):
@@ -198,6 +219,22 @@ class TokenTests(unittest.TestCase):
         with mock.patch("mailcom_client.time.time_ns", side_effect=[100, 101]):
             self.assertEqual(client._cache_buster(), "auth-id-100")
             self.assertEqual(client._cache_buster(), "auth-id-101")
+
+    def test_unfiltered_mail_query_omits_delayed_search_condition(self):
+        client = MailComClient("user@mail.com", "secret")
+        client.ensure_mail_token = mock.Mock(return_value="mail-token")
+        client.session.post = mock.Mock(
+            return_value=mock.Mock(
+                status_code=200,
+                json=mock.Mock(return_value={"mailListElements": []}),
+            )
+        )
+
+        client.query_messages("", amount=50)
+
+        _args, kwargs = client.session.post.call_args
+        self.assertNotIn("condition", kwargs["params"])
+        self.assertEqual(kwargs["params"]["amount"], "50")
 
     def test_mail_token_relogs_once_after_oauth_failure(self):
         test_case = self
@@ -388,6 +425,85 @@ class DeleteTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "母号不能"):
                 app.delete_alias(account, "parent@mail.com")
+
+
+class CodeFetchTests(unittest.TestCase):
+    def test_latest_unfiltered_message_bypasses_search_index_delay(self):
+        query_calls = []
+        now_ms = int(time.time() * 1000)
+
+        class FakeClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def query_messages(self, recipient="", *, amount=20):
+                query_calls.append((recipient, amount))
+                if recipient:
+                    return []
+                return [
+                    MailMessage(
+                        mail_id="latest-mail",
+                        subject="Your verification code",
+                        sender="service@example.com",
+                        recipients=["Child <child@engineer.com>"],
+                        date_ms=now_ms,
+                        folder="INBOX",
+                    )
+                ]
+
+            def get_body(self, mail_id):
+                return "Your verification code is 482913"
+
+            def export_state(self):
+                return {"sid": "updated"}
+
+        with tempfile.TemporaryDirectory() as tmp, redirect_stderr(io.StringIO()):
+            store = Store(Path(tmp), "https://codes.example")
+            primary = store.upsert_account("parent@mail.com", "secret")
+            child = store.add_address(primary.account_id, "child@engineer.com")
+            account = store.get_account(primary.account_id)
+            app = MailCodeApplication(store, "admin-token", client_factory=FakeClient)
+
+            result = app.fetch_code(account, child, trace_id="test-trace")
+
+            self.assertEqual(result["code"], "482913")
+            self.assertEqual(query_calls, [("", 50), ("child@engineer.com", 50)])
+
+    def test_unfiltered_query_does_not_cross_child_addresses(self):
+        now_ms = int(time.time() * 1000)
+
+        class FakeClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def query_messages(self, recipient="", *, amount=20):
+                if recipient:
+                    return []
+                return [
+                    MailMessage(
+                        mail_id="other-child-mail",
+                        subject="Your verification code",
+                        sender="service@example.com",
+                        recipients=["other-child@engineer.com"],
+                        date_ms=now_ms,
+                        folder="INBOX",
+                    )
+                ]
+
+            def get_body(self, mail_id):
+                raise AssertionError("不应读取其他子号的邮件正文")
+
+            def export_state(self):
+                return {}
+
+        with tempfile.TemporaryDirectory() as tmp, redirect_stderr(io.StringIO()):
+            store = Store(Path(tmp), "https://codes.example")
+            primary = store.upsert_account("parent@mail.com", "secret")
+            child = store.add_address(primary.account_id, "child@engineer.com")
+            account = store.get_account(primary.account_id)
+            app = MailCodeApplication(store, "admin-token", client_factory=FakeClient)
+
+            self.assertIsNone(app.fetch_code(account, child, trace_id="test-trace"))
 
 
 class ProxyClientTests(unittest.TestCase):
