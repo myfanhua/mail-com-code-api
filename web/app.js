@@ -684,7 +684,7 @@ document.querySelector('#query').addEventListener('click', async () => {
       const route = routeForEmail(email);
       if (!route) return {email, code: null, error: 'unknown_mailbox'};
       try {
-        const response = await fetch(`${route.url}?max_age=${encodeURIComponent(maxAge)}`);
+        const response = await fetch(`${route.url}?max_age=${encodeURIComponent(maxAge)}&wait=15`);
         const body = await response.json();
         return response.ok ? body : {...body, email};
       } catch {

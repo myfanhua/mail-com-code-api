@@ -280,6 +280,11 @@ class MailComClient:
             "x-ui-app": "mailcom.webmailer.mail-list/6.6.3",
         }
 
+    def _cache_buster(self) -> str:
+        # auth_id 在一次登录会话内不会变化，单独使用它会让连续查询命中
+        # mail.com 的旧邮件列表缓存，导致第二封验证码邮件暂时不可见。
+        return f"{self.auth_id}-{time.time_ns()}"
+
     def query_messages(self, recipient: str, *, amount: int = 20) -> list[MailMessage]:
         token = self.ensure_mail_token()
         params: dict[str, Any] = {
@@ -287,7 +292,7 @@ class MailComClient:
             "offset": "0",
             "amount": str(max(1, min(amount, 50))),
             "orderBy": "INTERNALDATE DESC",
-            "no_cache": self.auth_id,
+            "no_cache": self._cache_buster(),
             "condition": f"mail.header:subject,to,from,cc:{recipient}",
         }
         try:
@@ -299,6 +304,7 @@ class MailComClient:
         if response.status_code == 401:
             self.tokens.pop(self._token_key(MAIL_CLIENT_ID, MAIL_SCOPE), None)
             token = self.ensure_mail_token()
+            params["no_cache"] = self._cache_buster()
             try:
                 response = self.session.post(
                     MAIL_LIST_URL, params=params, data=b"", headers=self._mail_headers(token), timeout=self.timeout
@@ -339,7 +345,7 @@ class MailComClient:
         try:
             response = self.session.get(
                 MAIL_BODY_URL.format(mail_id=mail_id),
-                params={"absoluteURI": "false", "no_cache": self.auth_id},
+                params={"absoluteURI": "false", "no_cache": self._cache_buster()},
                 headers={**self._mail_headers(token), "Accept": "text/plain"},
                 timeout=self.timeout,
             )

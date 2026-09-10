@@ -185,6 +185,13 @@ class TokenTests(unittest.TestCase):
         token = f"{header}.{payload}.x"
         self.assertEqual(MailComClient.token_expiry(token), 1786878257.363)
 
+    def test_mail_queries_use_a_fresh_cache_buster(self):
+        client = MailComClient("user@mail.com", "secret")
+        client.auth_id = "auth-id"
+        with mock.patch("mailcom_client.time.time_ns", side_effect=[100, 101]):
+            self.assertEqual(client._cache_buster(), "auth-id-100")
+            self.assertEqual(client._cache_buster(), "auth-id-101")
+
     def test_mail_token_relogs_once_after_oauth_failure(self):
         test_case = self
 
