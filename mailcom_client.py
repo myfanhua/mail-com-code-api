@@ -508,19 +508,41 @@ class MailComClient:
     def delete_alias(self, address: str) -> None:
         address = address.strip().lower()
         token = self.ensure_settings_token()
-        try:
-            # mail.com 网页端使用 removal 动作，而不是对 emailAddresses 做 DELETE。
-            response = self.session.post(
-                SETTINGS_ADDRESS_REMOVALS_URL.format(
-                    address=quote(address, safe="")
-                ),
-                params={"absoluteURI": "false"},
-                headers=self._settings_headers(token, "text/plain;charset=UTF-8"),
-                timeout=self.timeout,
+        url = SETTINGS_ADDRESS_REMOVALS_URL.format(address=quote(address, safe=""))
+
+        def remove(current_token: str):
+            try:
+                # mail.com 网页端使用 removal 动作，而不是对 emailAddresses 做 DELETE。
+                return self.session.post(
+                    url,
+                    params={"absoluteURI": "false"},
+                    headers=self._settings_headers(
+                        current_token, "text/plain;charset=UTF-8"
+                    ),
+                    timeout=self.timeout,
+                )
+            except RequestException as exc:
+                raise MailComError(
+                    "无法连接 mail.com 删除子号服务", kind="network"
+                ) from exc
+
+        response = remove(token)
+        if response.status_code in {401, 403}:
+            # token 的 JWT 有效期尚未到，但上游仍可能提前撤销。清除单个
+            # settings token 后先通过 sid 刷新；sid 也失效时再由
+            # ensure_settings_token 完成一次完整登录。
+            self.tokens.pop(
+                self._token_key(SETTINGS_CLIENT_ID, SETTINGS_SCOPE), None
             )
-        except RequestException as exc:
-            raise MailComError("无法连接 mail.com 删除子号服务", kind="network") from exc
+            token = self.ensure_settings_token()
+            response = remove(token)
         if not 200 <= response.status_code < 300:
+            if response.status_code in {401, 403}:
+                raise MailComError(
+                    "删除子号时 mail.com 会话已失效或被拒绝",
+                    kind="session_expired",
+                    status=401,
+                )
             raise MailComError(
                 f"删除邮箱地址失败 (HTTP {response.status_code})",
                 kind="alias_delete_failed",

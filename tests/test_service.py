@@ -342,6 +342,22 @@ class TokenTests(unittest.TestCase):
         self.assertEqual(kwargs["params"], {"absoluteURI": "false"})
         self.assertEqual(kwargs["headers"]["Content-Type"], "text/plain;charset=UTF-8")
 
+    def test_delete_alias_refreshes_revoked_settings_token_once(self):
+        client = MailComClient("user@mail.com", "secret")
+        client.tokens[client._token_key("mailcom_mailset_root_live", "mail_mailbox_w webmailer_setting_r webmailer_setting_w mail_confix_w")] = "old-token"
+        client.session.post = mock.Mock(
+            side_effect=[mock.Mock(status_code=401), mock.Mock(status_code=204)]
+        )
+        client.ensure_settings_token = mock.Mock(
+            side_effect=["old-token", "fresh-token"]
+        )
+
+        client.delete_alias("child@engineer.com")
+
+        self.assertEqual(client.session.post.call_count, 2)
+        second_headers = client.session.post.call_args_list[1].kwargs["headers"]
+        self.assertEqual(second_headers["Authorization"], "Bearer fresh-token")
+
 
 class StorageTests(unittest.TestCase):
     def test_credentials_are_encrypted_and_export_format_is_stable(self):
@@ -427,6 +443,31 @@ class StorageTests(unittest.TestCase):
 
 
 class DeleteTests(unittest.TestCase):
+    def test_delete_child_reloads_latest_session_inside_account_lock(self):
+        seen_states = []
+
+        class FakeClient:
+            def __init__(self, *args, **kwargs):
+                seen_states.append(kwargs.get("state"))
+
+            def delete_alias(self, address):
+                pass
+
+            def export_state(self):
+                return {"sid": "latest"}
+
+        with tempfile.TemporaryDirectory() as tmp, redirect_stderr(io.StringIO()):
+            store = Store(Path(tmp), "https://codes.example")
+            primary = store.upsert_account("parent@mail.com", "secret")
+            store.add_address(primary.account_id, "child@engineer.com")
+            stale_account = store.get_account(primary.account_id)
+            store.update_session(primary.account_id, {"sid": "latest"})
+            app = MailCodeApplication(store, "admin-token", client_factory=FakeClient)
+
+            app.delete_alias(stale_account, "child@engineer.com")
+
+            self.assertEqual(seen_states[0]["sid"], "latest")
+
     def test_delete_child_removes_upstream_before_local_route(self):
         calls = []
 
@@ -463,6 +504,9 @@ class DeleteTests(unittest.TestCase):
             def delete_alias(self, address):
                 raise MailComError("upstream failed", kind="alias_delete_failed")
 
+            def export_state(self):
+                return {"sid": "refreshed-after-failure"}
+
         with tempfile.TemporaryDirectory() as tmp:
             store = Store(Path(tmp), "https://codes.example")
             primary = store.upsert_account("parent@mail.com", "secret")
@@ -476,6 +520,10 @@ class DeleteTests(unittest.TestCase):
                 app.delete_alias(account, "child@engineer.com")
 
             self.assertIsNotNone(store.get_by_address("child@engineer.com"))
+            self.assertEqual(
+                store.get_account(primary.account_id).session["sid"],
+                "refreshed-after-failure",
+            )
 
     def test_primary_address_cannot_be_deleted_as_child(self):
         with tempfile.TemporaryDirectory() as tmp:

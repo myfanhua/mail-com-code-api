@@ -593,10 +593,37 @@ class MailCodeApplication:
                 raise ValueError("子号不属于该母号")
             if found[1].is_primary:
                 raise ValueError("母号不能作为子号删除")
-            client = self.client_for(account)
-            client.delete_alias(found[1].address)
+            # 请求进入队列后，前一个分裂/取码任务可能已经刷新了会话；锁内重新
+            # 读取账号，避免继续使用 HTTP 请求开始时取得的旧 sid/token。
+            current_account = self.store.get_account(account.id) or account
+            client = self.client_for(current_account)
+            try:
+                client.delete_alias(found[1].address)
+            except MailComError as exc:
+                # 自动刷新过程中 sid/token 可能已经发生变化，即使删除失败也要
+                # 保存最新状态，避免用户再次点击时继续使用同一份过期会话。
+                self.store.update_session(
+                    account.id,
+                    client.export_state(),
+                    status=exc.kind,
+                    error=str(exc),
+                )
+                log_api_event(
+                    "alias_delete_failed",
+                    account=account.email,
+                    address=found[1].address,
+                    error=exc.kind,
+                    status=exc.status,
+                    detail=redact_log_text(exc),
+                )
+                raise
             self.store.delete_address(account.id, found[1].address)
             self.store.update_session(account.id, client.export_state(), status="ready")
+            log_api_event(
+                "alias_delete_succeeded",
+                account=account.email,
+                address=found[1].address,
+            )
 
     def delete_account(self, account: Account) -> None:
         # 与该母号的取码、同步和分裂操作串行，避免删除过程中又写回会话或子号。
