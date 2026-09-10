@@ -587,6 +587,23 @@ class MailCodeApplication:
             return routes
 
     def delete_alias(self, account: Account, address: str) -> None:
+        trace_id = secrets.token_hex(6)
+
+        def flush_diagnostics(client: Any) -> None:
+            drain = getattr(client, "drain_diagnostics", None)
+            if not callable(drain):
+                return
+            for sequence, detail in enumerate(drain(), 1):
+                if isinstance(detail, dict):
+                    log_api_event(
+                        "alias_delete_detail",
+                        trace_id=trace_id,
+                        sequence=sequence,
+                        account=account.email,
+                        address=address,
+                        **detail,
+                    )
+
         with self.account_lock(account.id):
             found = self.store.get_by_address(address)
             if not found or found[0].id != account.id:
@@ -608,8 +625,10 @@ class MailCodeApplication:
                     status=exc.kind,
                     error=str(exc),
                 )
+                flush_diagnostics(client)
                 log_api_event(
                     "alias_delete_failed",
+                    trace_id=trace_id,
                     account=account.email,
                     address=found[1].address,
                     error=exc.kind,
@@ -617,10 +636,12 @@ class MailCodeApplication:
                     detail=redact_log_text(exc),
                 )
                 raise
+            flush_diagnostics(client)
             self.store.delete_address(account.id, found[1].address)
             self.store.update_session(account.id, client.export_state(), status="ready")
             log_api_event(
                 "alias_delete_succeeded",
+                trace_id=trace_id,
                 account=account.email,
                 address=found[1].address,
             )

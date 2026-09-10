@@ -84,6 +84,7 @@ class MailComClient:
         # A proxy is an account property.  Reuse it for every upstream request;
         # rotation and fallback to another account's proxy are intentionally absent.
         self.proxy_url = proxy_url.strip()
+        self.diagnostics: list[dict[str, Any]] = []
         if self.proxy_url:
             self.session.trust_env = False
             self.session.proxies.update({"http": self.proxy_url, "https": self.proxy_url})
@@ -94,6 +95,22 @@ class MailComClient:
         cookies = state.get("cookies") or {}
         if isinstance(cookies, dict):
             self.session.cookies.update(cookies)
+        self._diagnose(
+            "client_initialized",
+            impersonate=HTTP_IMPERSONATE,
+            proxy_bound=bool(self.proxy_url),
+            restored_sid=bool(self.sid),
+            restored_auth_id=bool(self.auth_id),
+            restored_token_count=len(self.tokens),
+            restored_cookie_names=sorted(self.session.cookies.get_dict()),
+        )
+
+    def _diagnose(self, step: str, **fields: Any) -> None:
+        self.diagnostics.append({"step": step, **fields})
+
+    def drain_diagnostics(self) -> list[dict[str, Any]]:
+        rows, self.diagnostics = self.diagnostics, []
+        return rows
 
     def export_state(self) -> dict[str, Any]:
         return {
@@ -128,12 +145,26 @@ class MailComClient:
     def login(self, retries: int = 3) -> None:
         last_error: MailComError | None = None
         for attempt in range(retries):
+            self._diagnose("login_attempt_started", attempt=attempt + 1)
             try:
                 self._login_once()
                 self.tokens.clear()
+                self._diagnose(
+                    "login_attempt_succeeded",
+                    attempt=attempt + 1,
+                    sid_present=bool(self.sid),
+                    cookie_names=sorted(self.session.cookies.get_dict()),
+                )
                 return
             except MailComError as exc:
                 last_error = exc
+                self._diagnose(
+                    "login_attempt_failed",
+                    attempt=attempt + 1,
+                    error=exc.kind,
+                    status=exc.status,
+                    detail=str(exc),
+                )
                 if exc.kind in {"bad_credentials", "blocked"}:
                     break
                 if attempt + 1 < retries:
@@ -144,12 +175,20 @@ class MailComClient:
         statistics = ""
         try:
             page = self.session.get(LOGIN_PAGE_URL, timeout=self.timeout)
+            self._diagnose(
+                "login_page_response",
+                status=page.status_code,
+                final_host=urlparse(str(page.url)).hostname or "",
+                statistics_present=bool(STATISTICS_RE.search(page.text)) if page.ok else False,
+            )
             if page.ok:
                 match = STATISTICS_RE.search(page.text)
                 statistics = match.group(1) if match else ""
-        except RequestException:
+        except RequestException as exc:
             # The login POST can still work when the marketing page is unavailable.
-            pass
+            self._diagnose(
+                "login_page_request_failed", exception_type=type(exc).__name__
+            )
 
         form = {
             "username": self.username,
@@ -174,9 +213,21 @@ class MailComClient:
                 headers={"Origin": LOGIN_PAGE_URL.rstrip("/"), "Referer": LOGIN_PAGE_URL},
             )
         except RequestException as exc:
+            self._diagnose(
+                "login_post_request_failed", exception_type=type(exc).__name__
+            )
             raise MailComError("无法连接 mail.com 登录服务", kind="network") from exc
 
         location = response.headers.get("Location", "")
+        parsed_location = urlparse(urljoin(LOGIN_URL, location)) if location else None
+        self._diagnose(
+            "login_post_response",
+            status=response.status_code,
+            redirect_host=parsed_location.hostname if parsed_location else "",
+            redirect_path=parsed_location.path if parsed_location else "",
+            ott_present="ott=" in location,
+            cookie_names=sorted(self.session.cookies.get_dict()),
+        )
         if response.status_code == 429:
             raise MailComError("mail.com 登录频率受限", kind="rate_limited", status=429)
         if response.status_code == 403:
@@ -199,9 +250,21 @@ class MailComClient:
         try:
             exchanged = self.session.get(halogin, allow_redirects=False, timeout=self.timeout)
         except RequestException as exc:
+            self._diagnose(
+                "halogin_request_failed", exception_type=type(exc).__name__
+            )
             raise MailComError("无法完成 mail.com 会话交换", kind="network") from exc
         location = exchanged.headers.get("Location", "")
         sid = (parse_qs(urlparse(location).query).get("sid") or [""])[0]
+        exchange_location = urlparse(location)
+        self._diagnose(
+            "halogin_response",
+            status=exchanged.status_code,
+            redirect_host=exchange_location.hostname or "",
+            redirect_path=exchange_location.path or "",
+            sid_present=bool(sid),
+            cookie_names=sorted(self.session.cookies.get_dict()),
+        )
         if exchanged.status_code not in (302, 303) or not sid:
             raise MailComError("mail.com 会话交换未返回 sid", kind="session_rejected", status=401)
         self.sid = sid
@@ -252,11 +315,19 @@ class MailComClient:
         token = self.tokens.get(key, "")
         if token and not force:
             try:
-                if self.token_expiry(token) > time.time() + 60:
+                remaining = round(self.token_expiry(token) - time.time())
+                self._diagnose(
+                    "oauth_cached_token_checked",
+                    client_id=client_id,
+                    scope=scope,
+                    remaining_seconds=remaining,
+                )
+                if remaining > 60:
                     return token
             except MailComError:
                 pass
         if not self.sid:
+            self._diagnose("oauth_missing_sid", client_id=client_id, scope=scope)
             self.login()
 
         try:
@@ -268,8 +339,24 @@ class MailComClient:
                 headers=self._oauth_headers(client_id),
             )
         except RequestException as exc:
+            self._diagnose(
+                "oauth_request_failed",
+                client_id=client_id,
+                scope=scope,
+                exception_type=type(exc).__name__,
+            )
             raise MailComError("无法连接 mail.com OAuth 服务", kind="network") from exc
         oauth_error, oauth_description = self._oauth_error_detail(response)
+        self._diagnose(
+            "oauth_response",
+            client_id=client_id,
+            scope=scope,
+            force=force,
+            sid_present=bool(self.sid),
+            status=response.status_code,
+            oauth_error=oauth_error,
+            oauth_description=oauth_description,
+        )
         oauth_summary = " / ".join(value for value in (oauth_error, oauth_description) if value)
         if response.status_code in (401, 403) or "NO_SESSION" in oauth_description.upper():
             raise MailComError("mail.com 会话已失效或被拒绝", kind="session_expired", status=401)
@@ -298,10 +385,23 @@ class MailComClient:
             # 反复登录也无法修复，反而会触发 mail.com 的 IP 风控。
             if exc.kind != "session_expired":
                 raise
-            self.sid = ""
-            self.tokens.clear()
+            self._reset_auth_session()
             self.login()
             return self._get_token_after_fresh_login(MAIL_SCOPE, MAIL_CLIENT_ID)
+
+    def _reset_auth_session(self) -> None:
+        """清除整套旧认证上下文，避免过期 navigator cookie 污染重新登录。"""
+        self._diagnose(
+            "auth_session_reset",
+            old_sid_present=bool(self.sid),
+            old_auth_id_present=bool(self.auth_id),
+            old_token_count=len(self.tokens),
+            old_cookie_names=sorted(self.session.cookies.get_dict()),
+        )
+        self.sid = ""
+        self.auth_id = ""
+        self.tokens.clear()
+        self.session.cookies.clear()
 
     def _get_token_after_fresh_login(self, scope: str, client_id: str) -> str:
         """halogin 后 OAuth 会话可能短暂尚未同步，只重试 token，不重复登录。"""
@@ -310,6 +410,13 @@ class MailComClient:
             if delay:
                 time.sleep(delay)
             try:
+                self._diagnose(
+                    "oauth_after_login_attempt",
+                    attempt=attempt,
+                    delay_seconds=delay,
+                    client_id=client_id,
+                    scope=scope,
+                )
                 return self.get_token(scope, client_id, force=True)
             except MailComError as exc:
                 last_error = exc
@@ -422,8 +529,7 @@ class MailComClient:
         except MailComError as exc:
             if exc.kind != "session_expired":
                 raise
-            self.sid = ""
-            self.tokens.clear()
+            self._reset_auth_session()
             self.login()
             return self._get_token_after_fresh_login(SETTINGS_SCOPE, SETTINGS_CLIENT_ID)
 
@@ -507,10 +613,20 @@ class MailComClient:
 
     def delete_alias(self, address: str) -> None:
         address = address.strip().lower()
+        self._diagnose("alias_delete_started")
         token = self.ensure_settings_token()
         url = SETTINGS_ADDRESS_REMOVALS_URL.format(address=quote(address, safe=""))
 
-        def remove(current_token: str):
+        def remove(current_token: str, attempt: int):
+            self._diagnose(
+                "alias_delete_request_started",
+                attempt=attempt,
+                request_host=urlparse(url).hostname or "",
+                request_path=urlparse(url).path,
+                proxy_bound=bool(self.proxy_url),
+                sid_present=bool(self.sid),
+                cookie_names=sorted(self.session.cookies.get_dict()),
+            )
             try:
                 # mail.com 网页端使用 removal 动作，而不是对 emailAddresses 做 DELETE。
                 return self.session.post(
@@ -522,11 +638,25 @@ class MailComClient:
                     timeout=self.timeout,
                 )
             except RequestException as exc:
+                self._diagnose(
+                    "alias_delete_request_failed",
+                    attempt=attempt,
+                    exception_type=type(exc).__name__,
+                )
                 raise MailComError(
                     "无法连接 mail.com 删除子号服务", kind="network"
                 ) from exc
 
-        response = remove(token)
+        response = remove(token, 1)
+        delete_error, delete_description = self._oauth_error_detail(response)
+        self._diagnose(
+            "alias_delete_response",
+            attempt=1,
+            status=response.status_code,
+            content_type=str(response.headers.get("Content-Type") or "")[:100],
+            upstream_error=delete_error,
+            upstream_description=delete_description,
+        )
         if response.status_code in {401, 403}:
             # token 的 JWT 有效期尚未到，但上游仍可能提前撤销。清除单个
             # settings token 后先通过 sid 刷新；sid 也失效时再由
@@ -535,7 +665,16 @@ class MailComClient:
                 self._token_key(SETTINGS_CLIENT_ID, SETTINGS_SCOPE), None
             )
             token = self.ensure_settings_token()
-            response = remove(token)
+            response = remove(token, 2)
+            delete_error, delete_description = self._oauth_error_detail(response)
+            self._diagnose(
+                "alias_delete_response",
+                attempt=2,
+                status=response.status_code,
+                content_type=str(response.headers.get("Content-Type") or "")[:100],
+                upstream_error=delete_error,
+                upstream_description=delete_description,
+            )
         if not 200 <= response.status_code < 300:
             if response.status_code in {401, 403}:
                 raise MailComError(

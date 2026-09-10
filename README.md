@@ -141,6 +141,8 @@ first@mail.com----password----http://proxy-user:proxy-pass@proxy.example:8080
 
 `OAuthBridge.NO_SESSION` 会被识别为会话过期并自动重新登录。刚登录后的 OAuth 会话可能存在短暂同步延迟，此时服务只重试 token；其他 OAuth 配置错误不会反复触发登录，避免把服务器 IP 或代理打入 mail.com 风控。
 
+删除子号也会输出同一 `trace_id` 的完整认证与请求链路：`alias_delete_detail` 逐步记录客户端初始化、缓存 token 剩余时间、OAuth 响应、旧认证上下文清理、重新登录、OAuth 重试和两次删除响应，最后由 `alias_delete_succeeded` 或 `alias_delete_failed` 汇总。日志仅记录 sid/token 是否存在、cookie 名称和上游错误名称，不记录 sid、token、cookie 值或邮箱密码。删除返回 `401/403` 时会刷新 settings token 并自动重试一次；若 sid 已失效，会清空包括 `navigator` cookie 在内的旧认证上下文后重新登录，避免旧 cookie 污染新会话。
+
 HTTP 指纹由 `curl_cffi` 的 `MAIL_HTTP_IMPERSONATE` 统一生成。默认不要设置 `MAIL_HTTP_USER_AGENT`；手动设置时必须与模拟的浏览器版本一致，否则会出现 TLS 模拟版本、User-Agent 和 Client Hints 相互矛盾的情况。
 
 ## 导入与验证

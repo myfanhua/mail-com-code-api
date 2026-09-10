@@ -244,11 +244,13 @@ class TokenTests(unittest.TestCase):
                 super().__init__("user@mail.com", "secret")
                 self.sid = "stale"
                 self.tokens = {"old": "token"}
+                self.session.cookies.set("navigator", "stale-cookie")
                 self.login_calls = 0
                 self.token_calls = 0
 
             def login(self, retries: int = 3) -> None:
                 self.login_calls += 1
+                test_case.assertEqual(self.session.cookies.get_dict(), {})
                 self.sid = "fresh"
 
             def get_token(self, scope: str, client_id: str, *, force: bool = False) -> str:
@@ -327,7 +329,8 @@ class TokenTests(unittest.TestCase):
 
     def test_delete_alias_uses_mailcom_removal_action(self):
         client = MailComClient("user@mail.com", "secret")
-        response = mock.Mock(status_code=204)
+        response = mock.Mock(status_code=204, headers={})
+        response.json.side_effect = ValueError
         client.session.post = mock.Mock(return_value=response)
         client.ensure_settings_token = mock.Mock(return_value="settings-token")
 
@@ -346,7 +349,10 @@ class TokenTests(unittest.TestCase):
         client = MailComClient("user@mail.com", "secret")
         client.tokens[client._token_key("mailcom_mailset_root_live", "mail_mailbox_w webmailer_setting_r webmailer_setting_w mail_confix_w")] = "old-token"
         client.session.post = mock.Mock(
-            side_effect=[mock.Mock(status_code=401), mock.Mock(status_code=204)]
+            side_effect=[
+                mock.Mock(status_code=401, headers={}, json=mock.Mock(return_value={})),
+                mock.Mock(status_code=204, headers={}, json=mock.Mock(return_value={})),
+            ]
         )
         client.ensure_settings_token = mock.Mock(
             side_effect=["old-token", "fresh-token"]
@@ -443,6 +449,48 @@ class StorageTests(unittest.TestCase):
 
 
 class DeleteTests(unittest.TestCase):
+    def test_delete_child_logs_each_diagnostic_with_same_trace_id(self):
+        class FakeClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def delete_alias(self, address):
+                raise MailComError(
+                    "mail.com 会话已失效或被拒绝",
+                    kind="session_expired",
+                    status=401,
+                )
+
+            def drain_diagnostics(self):
+                return [
+                    {"step": "oauth_response", "status": 400},
+                    {"step": "auth_session_reset", "old_cookie_names": ["navigator"]},
+                ]
+
+            def export_state(self):
+                return {"sid": ""}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(Path(tmp), "https://codes.example")
+            primary = store.upsert_account("parent@mail.com", "secret")
+            store.add_address(primary.account_id, "child@engineer.com")
+            account = store.get_account(primary.account_id)
+            app = MailCodeApplication(store, "admin-token", client_factory=FakeClient)
+            captured = io.StringIO()
+
+            with redirect_stderr(captured), self.assertRaises(MailComError):
+                app.delete_alias(account, "child@engineer.com")
+
+            events = [
+                json.loads(line.removeprefix("mail-code-api "))
+                for line in captured.getvalue().splitlines()
+            ]
+            details = [row for row in events if row["event"] == "alias_delete_detail"]
+            failed = next(row for row in events if row["event"] == "alias_delete_failed")
+            self.assertEqual([row["sequence"] for row in details], [1, 2])
+            self.assertEqual([row["step"] for row in details], ["oauth_response", "auth_session_reset"])
+            self.assertTrue(all(row["trace_id"] == failed["trace_id"] for row in details))
+
     def test_delete_child_reloads_latest_session_inside_account_lock(self):
         seen_states = []
 
