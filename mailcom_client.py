@@ -179,7 +179,8 @@ class MailComClient:
         if response.status_code == 429:
             raise MailComError("mail.com 登录频率受限", kind="rate_limited", status=429)
         if response.status_code == 403:
-            raise MailComError("mail.com 拒绝了当前网络的登录请求", kind="blocked", status=403)
+            network = "当前绑定代理" if self.proxy_url else "服务器公网 IP（账号未绑定代理）"
+            raise MailComError(f"mail.com 拒绝了{network}的登录请求", kind="blocked", status=403)
         if response.status_code in (302, 303) and "ott=" not in location:
             kind = "bad_credentials" if "logout?ls=wd" in location else "login_redirect"
             raise MailComError("登录未返回一次性令牌", kind=kind, status=401)
@@ -226,6 +227,21 @@ class MailComClient:
         context["Authorization"] = f"Basic {basic}"
         return context
 
+    @staticmethod
+    def _oauth_error_detail(response: Any) -> tuple[str, str]:
+        """只提取 OAuth 错误名称，不记录响应中的任何令牌或会话值。"""
+        try:
+            payload = response.json()
+        except (ValueError, TypeError):
+            return "", ""
+        if not isinstance(payload, dict):
+            return "", ""
+        error = re.sub(r"[^A-Za-z0-9_.:-]", "", str(payload.get("error") or ""))[:80]
+        description = re.sub(
+            r"[^A-Za-z0-9_.: /-]", "", str(payload.get("error_description") or "")
+        )[:160]
+        return error, description
+
     def get_token(self, scope: str, client_id: str, *, force: bool = False) -> str:
         key = self._token_key(client_id, scope)
         token = self.tokens.get(key, "")
@@ -248,12 +264,18 @@ class MailComClient:
             )
         except RequestException as exc:
             raise MailComError("无法连接 mail.com OAuth 服务", kind="network") from exc
-        if response.status_code in (401, 403):
+        oauth_error, oauth_description = self._oauth_error_detail(response)
+        oauth_summary = " / ".join(value for value in (oauth_error, oauth_description) if value)
+        if response.status_code in (401, 403) or "NO_SESSION" in oauth_description.upper():
             raise MailComError("mail.com 会话已失效或被拒绝", kind="session_expired", status=401)
         if response.status_code == 429:
             raise MailComError("mail.com token 请求频率受限", kind="rate_limited", status=429)
         if response.status_code != 200:
-            raise MailComError(f"token 请求失败 (HTTP {response.status_code})", kind="oauth_failed")
+            suffix = f": {oauth_summary}" if oauth_summary else ""
+            raise MailComError(
+                f"token 请求失败 (HTTP {response.status_code}{suffix})",
+                kind="oauth_failed",
+            )
         try:
             token = str(response.json()["access_token"])
         except (ValueError, KeyError) as exc:
@@ -267,7 +289,9 @@ class MailComClient:
         try:
             return self.get_token(MAIL_SCOPE, MAIL_CLIENT_ID)
         except MailComError as exc:
-            if exc.kind not in {"session_expired", "oauth_failed"}:
+            # 只有明确的会话失效才重新登录。配置、scope 或 public client 错误
+            # 反复登录也无法修复，反而会触发 mail.com 的 IP 风控。
+            if exc.kind != "session_expired":
                 raise
             self.sid = ""
             self.tokens.clear()
@@ -377,7 +401,7 @@ class MailComClient:
         try:
             return self.get_token(SETTINGS_SCOPE, SETTINGS_CLIENT_ID)
         except MailComError as exc:
-            if exc.kind not in {"session_expired", "oauth_failed"}:
+            if exc.kind != "session_expired":
                 raise
             self.sid = ""
             self.tokens.clear()

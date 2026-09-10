@@ -133,6 +133,14 @@ curl 'https://mail-code.example.com/code/<access_key>'
 - `code_fetch_empty` / `code_fetch_failed`：未取到或上游请求失败的具体阶段。
 - `code_request_finished`：最终结果和轮询次数。
 
+如果日志中同时出现 `proxy_bound:false` 和 `error:"blocked"`，表示账号实际使用的是服务器公网 IP，mail.com 已拒绝该机房网络，并不是验证码筛选问题。应先在代理池中保存代理，然后重新导入该母号并勾选“使用代理”；已有但尚未绑定代理的母号会在重新导入时领取代理。导入文本中直接填写的行内代理始终生效，不依赖“使用代理”复选框，例如：
+
+```text
+first@mail.com----password----http://proxy-user:proxy-pass@proxy.example:8080
+```
+
+`OAuthBridge.NO_SESSION` 会被识别为会话过期并自动重新登录；其他 OAuth 配置错误不会反复触发登录，避免把服务器 IP 或代理打入 mail.com 风控。
+
 ## 导入与验证
 
 `POST /admin/import` 使用 `Authorization: Bearer <admin.token>` 导入邮箱密码；首次导入响应中的 `lines` 只应保存到调用方。之后用正确邮箱密码调用 `/auth/login`，服务才返回该邮箱的接码地址。错误密码不会返回地址。网页控制台同样需要先输入 `data/admin.token` 完成管理员验证，令牌保存在当前浏览器的 `localStorage` 中，之后打开页面会自动验证。

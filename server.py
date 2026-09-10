@@ -456,7 +456,9 @@ class MailCodeApplication:
                     raise RuntimeError("account disappeared after import")
                 return route, account
 
-            proxy_url = supplied_proxy if use_proxy_pool else None
+            # 行内显式代理始终生效；use_proxy_pool 只控制没有行内代理时
+            # 是否从固定代理池领取。此前这里错误地在未勾选代理池时丢弃行内代理。
+            proxy_url = supplied_proxy
             allocated = False
             if proxy_url and proxy_url in self._assigned_proxies:
                 raise ValueError("proxy_already_assigned")
@@ -733,6 +735,14 @@ class MailCodeApplication:
                         status=exc.status,
                         detail=redact_log_text(exc),
                     )
+                    if exc.kind in {
+                        "blocked",
+                        "oauth_failed",
+                        "session_expired",
+                        "rate_limited",
+                        "bad_credentials",
+                    }:
+                        raise
                 try:
                     filtered_messages = client.query_messages(route.address, amount=50)
                 except MailComError as exc:
@@ -846,7 +856,14 @@ class MailCodeApplication:
                 )
                 return None
             except MailComError as exc:
-                self.store.update_status(account.id, exc.kind, str(exc))
+                # 保存自动刷新过程中清除或更新过的 sid/token，避免下一次请求
+                # 继续使用同一份已确认失效的会话。
+                self.store.update_session(
+                    account.id,
+                    client.export_state(),
+                    status=exc.kind,
+                    error=str(exc),
+                )
                 log_api_event(
                     "code_fetch_failed",
                     trace_id=trace_id,

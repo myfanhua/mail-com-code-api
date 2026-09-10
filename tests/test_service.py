@@ -236,7 +236,7 @@ class TokenTests(unittest.TestCase):
         self.assertNotIn("condition", kwargs["params"])
         self.assertEqual(kwargs["params"]["amount"], "50")
 
-    def test_mail_token_relogs_once_after_oauth_failure(self):
+    def test_mail_token_relogs_once_after_session_failure(self):
         test_case = self
 
         class FlakyOAuthClient(MailComClient):
@@ -254,7 +254,7 @@ class TokenTests(unittest.TestCase):
             def get_token(self, scope: str, client_id: str, *, force: bool = False) -> str:
                 self.token_calls += 1
                 if self.token_calls == 1:
-                    raise MailComError("token 请求失败 (HTTP 400)", kind="oauth_failed")
+                    raise MailComError("会话失效", kind="session_expired")
                 test_case.assertTrue(force)
                 test_case.assertEqual(self.sid, "fresh")
                 return "fresh-token"
@@ -263,6 +263,41 @@ class TokenTests(unittest.TestCase):
 
         self.assertEqual(client.ensure_mail_token(), "fresh-token")
         self.assertEqual(client.login_calls, 1)
+
+    def test_mail_token_does_not_relogin_for_non_session_oauth_error(self):
+        class BrokenOAuthClient(MailComClient):
+            def __init__(self):
+                super().__init__("user@mail.com", "secret")
+                self.login_calls = 0
+
+            def login(self, retries: int = 3) -> None:
+                self.login_calls += 1
+
+            def get_token(self, scope: str, client_id: str, *, force: bool = False) -> str:
+                raise MailComError("wrong client", kind="oauth_failed")
+
+        client = BrokenOAuthClient()
+        with self.assertRaises(MailComError):
+            client.ensure_mail_token()
+        self.assertEqual(client.login_calls, 0)
+
+    def test_oauth_no_session_error_is_classified_as_expired_session(self):
+        client = MailComClient("user@mail.com", "secret")
+        client.sid = "stale"
+        client.session.post = mock.Mock(
+            return_value=mock.Mock(
+                status_code=400,
+                json=mock.Mock(
+                    return_value={
+                        "error": "unauthorized_user",
+                        "error_description": "OAuthBridge.NO_SESSION",
+                    }
+                ),
+            )
+        )
+        with self.assertRaises(MailComError) as raised:
+            client.get_token("mail_mailbox_r", "mail-client")
+        self.assertEqual(raised.exception.kind, "session_expired")
 
     def test_delete_alias_uses_mailcom_removal_action(self):
         client = MailComClient("user@mail.com", "secret")
@@ -505,6 +540,36 @@ class CodeFetchTests(unittest.TestCase):
 
             self.assertIsNone(app.fetch_code(account, child, trace_id="test-trace"))
 
+    def test_auth_failure_stops_second_query_and_persists_client_state(self):
+        query_calls = []
+
+        class FakeClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def query_messages(self, recipient="", *, amount=20):
+                query_calls.append(recipient)
+                raise MailComError(
+                    "服务器公网 IP 被拒绝", kind="blocked", status=403
+                )
+
+            def export_state(self):
+                return {"sid": "", "tokens": {}}
+
+        with tempfile.TemporaryDirectory() as tmp, redirect_stderr(io.StringIO()):
+            store = Store(Path(tmp), "https://codes.example")
+            primary = store.upsert_account("parent@mail.com", "secret")
+            account = store.get_account(primary.account_id)
+            app = MailCodeApplication(store, "admin-token", client_factory=FakeClient)
+
+            with self.assertRaises(MailComError):
+                app.fetch_code(account, primary, trace_id="test-trace")
+
+            self.assertEqual(query_calls, [""])
+            saved = store.get_account(primary.account_id)
+            self.assertEqual(saved.status, "blocked")
+            self.assertEqual(saved.session["sid"], "")
+
 
 class ProxyClientTests(unittest.TestCase):
     def test_client_uses_account_proxy_for_all_requests(self):
@@ -575,6 +640,22 @@ class ProxyPoolTests(unittest.TestCase):
 
             self.assertEqual(account.proxy_url, "")
             self.assertEqual(app.proxy_pool_stats(), {"total": 1, "assigned": 0, "remaining": 1})
+
+    def test_explicit_import_proxy_does_not_require_pool_checkbox(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(Path(tmp), "https://codes.example")
+            app = MailCodeApplication(store, "admin-token")
+
+            _, account = app.import_account(
+                "first@mail.com",
+                "secret-1",
+                "http://proxy-user:proxy-pass@gate.example:1000",
+            )
+
+            self.assertEqual(
+                account.proxy_url,
+                "http://proxy-user:proxy-pass@gate.example:1000",
+            )
 
 
 class SplitAliasTests(unittest.TestCase):
