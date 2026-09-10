@@ -29,6 +29,7 @@ from server import (
     parse_account_rows,
     parse_credentials,
     parse_email_list,
+    parse_pagination,
     parse_timestamp,
 )  # noqa: E402
 from storage import Address, Store  # noqa: E402
@@ -159,6 +160,12 @@ class ParsingTests(unittest.TestCase):
         self.assertEqual(parse_timestamp("1786871000000"), 1786871000)
         self.assertEqual(parse_timestamp("2026-08-16T00:00:00Z"), 1786838400)
 
+    def test_pagination_is_parsed_and_capped(self):
+        self.assertEqual(parse_pagination("page=2&page_size=50"), (2, 50))
+        self.assertEqual(parse_pagination("page=0&page_size=999"), (1, 100))
+        with self.assertRaisesRegex(ValueError, "page"):
+            parse_pagination("page=bad")
+
 
 class CodeExtractionTests(unittest.TestCase):
     def test_context_code_wins(self):
@@ -230,6 +237,34 @@ class StorageTests(unittest.TestCase):
             account = store.get_account(route.account_id)
             self.assertEqual(account.session["sid"], "private")
             self.assertNotIn(b"private", store.db_path.read_bytes())
+
+    def test_sql_pagination_for_accounts_and_addresses(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(Path(tmp), "https://codes.example")
+            first = store.upsert_account("first@mail.com", "first-secret")
+            store.add_address(first.account_id, "first-child@engineer.com")
+            store.upsert_account("second@mail.com", "second-secret")
+
+            accounts, account_total = store.list_accounts_page(1, 1)
+            self.assertEqual(account_total, 2)
+            self.assertEqual(len(accounts), 1)
+            self.assertEqual(accounts[0]["email"], "second@mail.com")
+            self.assertEqual(accounts[0]["password"], "second-secret")
+
+            filtered, filtered_total = store.list_accounts_page(
+                1, 10, "first-child@engineer.com"
+            )
+            self.assertEqual(filtered_total, 1)
+            self.assertEqual(filtered[0]["email"], "first@mail.com")
+            filtered, filtered_total = store.list_accounts_page(1, 10, "SECOND@MAIL.COM")
+            self.assertEqual(filtered_total, 1)
+            self.assertEqual(filtered[0]["email"], "second@mail.com")
+
+            addresses, address_total = store.list_addresses_page(1, 2)
+            self.assertEqual(address_total, 3)
+            self.assertEqual(len(addresses), 2)
+            self.assertNotIn("password", addresses[0])
+            self.assertIn(addresses[0]["email_type"], {"母号", "子号"})
 
     def test_proxy_binding_is_encrypted_and_immutable(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -337,9 +372,9 @@ class SplitAliasTests(unittest.TestCase):
 
             self.assertEqual(len(routes), 9)
             self.assertTrue(all(isinstance(route, Address) for route in routes))
-            self.assertTrue(
-                all(route.address.startswith("longusername-split-") for route in routes)
-            )
+            self.assertEqual(len({route.address for route in routes}), 9)
+            self.assertTrue(all("-split-" not in route.address for route in routes))
+            self.assertTrue(all(not route.address.startswith("longusername") for route in routes))
 
     def test_split_aliases_rejects_full_account(self):
         class FakeSplitApplication(MailCodeApplication):
@@ -371,7 +406,8 @@ class SplitAliasTests(unittest.TestCase):
             routes = app.split_aliases(account, 2, prefix="blader.com")
 
             self.assertEqual(len(routes), 2)
-            self.assertTrue(all(route.address.startswith("blader.com-split-") for route in routes))
+            self.assertTrue(all(route.address.startswith("blader.com") for route in routes))
+            self.assertTrue(all("-split-" not in route.address for route in routes))
 
     def test_split_aliases_uses_custom_domain(self):
         class FakeSplitApplication(MailCodeApplication):
@@ -621,7 +657,7 @@ class ProxyPoolTests(unittest.TestCase):
             self.assertEqual(handler.responses[0][0], 200)
             self.assertEqual(handler.responses[0][1]["proxy_pool"]["total"], 2)
 
-    def test_public_proxy_pool_post_does_not_require_admin_token(self):
+    def test_proxy_pool_post_requires_admin_token(self):
         class DummyHandler:
             def __init__(self, app):
                 self.app = app
@@ -633,6 +669,10 @@ class ProxyPoolTests(unittest.TestCase):
 
             def handle_proxy_pool(self, payload):
                 return MailCodeHandler.handle_proxy_pool(self, payload)  # type: ignore[misc]
+
+            def require_admin(self):
+                self.json_response(401, {"error": "unauthorized"})
+                return False
 
             def json_response(self, status, payload):
                 self.responses.append((status, payload))
@@ -646,8 +686,8 @@ class ProxyPoolTests(unittest.TestCase):
 
             MailCodeHandler.do_POST(handler)  # type: ignore[misc]
 
-            self.assertEqual(handler.responses[0][0], 200)
-            self.assertEqual(handler.responses[0][1]["proxy_pool"]["total"], 2)
+            self.assertEqual(handler.responses, [(401, {"error": "unauthorized"})])
+            self.assertFalse(proxy_file.exists())
 
 
 if __name__ == "__main__":

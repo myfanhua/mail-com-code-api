@@ -2,10 +2,23 @@ const accountsBody = document.querySelector('#accounts');
 const toast = document.querySelector('#toast');
 const accountsStorageKey = 'mail-code-accounts';
 const routesStorageKey = 'mail-code-routes';
+const adminTokenStorageKey = 'mail-code-admin-token';
+const splitDomainStorageKey = 'mail-code-split-domains';
 let savedAccounts = readSavedAccounts();
+let motherAccounts = [];
+let addressRows = [];
+let motherPage = 1;
+let motherTotalPages = 1;
+let motherSearch = '';
+let addressPage = 1;
+let addressTotalPages = 1;
+const sqlPageSize = 10;
+let adminToken = localStorage.getItem(adminTokenStorageKey) || sessionStorage.getItem(adminTokenStorageKey) || '';
+let adminAuthenticated = false;
 const proxyPoolInput = document.querySelector('#proxy-pool-input');
 const proxyPoolStatus = document.querySelector('#proxy-pool-status');
 const splitProgress = document.querySelector('#split-progress');
+const splitDomainInput = document.querySelector('#import-split-domain');
 let healthPollingTimer = null;
 let healthPollingInFlight = false;
 
@@ -18,11 +31,125 @@ function notify(message, error = false) {
 
 async function request(path, options = {}) {
   const headers = new Headers(options.headers || {});
+  if (adminToken) headers.set('Authorization', `Bearer ${adminToken}`);
   const response = await fetch(path, {...options, headers});
   const type = response.headers.get('content-type') || '';
   const body = type.includes('json') ? await response.json() : await response.text();
   if (!response.ok) throw new Error(body?.detail || body?.error || `HTTP ${response.status}`);
   return body;
+}
+
+function setAdminAuthenticated(authenticated) {
+  adminAuthenticated = authenticated;
+  const status = document.querySelector('#admin-auth-status');
+  const button = document.querySelector('#admin-login');
+  document.querySelector('#admin-access').hidden = authenticated;
+  document.querySelector('#admin-content').hidden = !authenticated;
+  status.textContent = authenticated ? '验证成功，已在当前浏览器记住' : '请输入 data/admin.token';
+  button.textContent = authenticated ? '重新验证' : '验证';
+  document.querySelectorAll('#import, #export, #refresh, #refresh-mothers, #copy-mother-routes, #query, #save-proxy-pool, #copy-routes, #copy-result')
+    .forEach(control => { control.disabled = !authenticated; });
+  if (!authenticated) {
+    renderMotherAccounts([]);
+    renderAddressRows([]);
+  }
+}
+
+async function authenticateAdmin() {
+  const input = document.querySelector('#admin-token');
+  const candidate = input.value.trim();
+  if (!candidate) return notify('请输入 admin.token', true);
+  adminToken = candidate;
+  try {
+    await request('/admin/accounts?page=1&page_size=1');
+    localStorage.setItem(adminTokenStorageKey, adminToken);
+    sessionStorage.removeItem(adminTokenStorageKey);
+    input.value = '';
+    setAdminAuthenticated(true);
+    await Promise.all([refreshMotherAccounts(false), refreshAddressRows(false)]);
+    notify('管理员验证成功');
+  } catch (error) {
+    adminToken = '';
+    localStorage.removeItem(adminTokenStorageKey);
+    sessionStorage.removeItem(adminTokenStorageKey);
+    setAdminAuthenticated(false);
+    notify(`管理员验证失败：${error.message}`, true);
+  }
+}
+
+function renderMotherAccounts(accounts) {
+  const container = document.querySelector('#mother-accounts');
+  const status = document.querySelector('#mother-list-status');
+  if (!accounts.length) {
+    container.innerHTML = '<div class="empty">暂无母号</div>';
+    status.textContent = '共 0 个母号';
+    return;
+  }
+  container.innerHTML = accounts.map(account => {
+    const addresses = Array.isArray(account.addresses) ? account.addresses : [];
+    const children = addresses.filter(route => !route.is_primary);
+    return `
+      <details class="mother-account">
+        <summary>
+          <span class="mother-email">${escapeHtml(account.email)}</span>
+          <button class="copy copy-mother-group" data-account-id="${escapeHtml(account.id)}">复制母号和子号</button>
+          <span class="mother-password">密码：${escapeHtml(account.password || '—')}</span>
+          <span class="status ${statusClass(account.status)}">${escapeHtml(account.status || '未知')}</span>
+          <span class="mother-meta">子号 ${children.length} 个 · ${account.proxy_bound ? '已绑定代理' : '未绑定代理'}</span>
+        </summary>
+        <div class="mother-children">
+          ${children.length ? children.map(route => `
+            <div class="mother-child-row">
+              <span>${escapeHtml(route.address)}</span>
+              <span class="route" title="${escapeHtml(route.url)}">${escapeHtml(route.url)}</span>
+              <button class="copy copy-child" data-address="${escapeHtml(route.address)}" data-url="${escapeHtml(route.url)}">复制</button>
+            </div>
+          `).join('') : '<div class="empty mother-empty">该母号暂无子号</div>'}
+        </div>
+      </details>`;
+  }).join('');
+  container.querySelectorAll('.copy-child').forEach(button => button.addEventListener('click', async () => {
+    await navigator.clipboard.writeText(`${button.dataset.address}----${button.dataset.url}`);
+    notify('子号和取码地址已复制');
+  }));
+  container.querySelectorAll('.copy-mother-group').forEach(button => button.addEventListener('click', async event => {
+    event.preventDefault();
+    event.stopPropagation();
+    const account = motherAccounts.find(item => String(item.id) === button.dataset.accountId);
+    const lines = (account?.addresses || []).map(route => `${route.address}----${route.url}`);
+    if (!lines.length) return notify('该母号没有可复制的取码地址', true);
+    await navigator.clipboard.writeText(lines.join('\n'));
+    notify(`已复制该母号及其 ${Math.max(0, lines.length - 1)} 个子号`);
+  }));
+  const childCount = accounts.reduce(
+    (sum, account) => sum + (account.addresses || []).filter(route => !route.is_primary).length,
+    0,
+  );
+  status.textContent = `共 ${accounts.length} 个母号，${childCount} 个子号`;
+}
+
+async function refreshMotherAccounts(showNotice = true) {
+  try {
+    const query = new URLSearchParams({
+      page: String(motherPage),
+      page_size: String(sqlPageSize),
+      ...(motherSearch ? {q: motherSearch} : {}),
+    });
+    const result = await request(`/admin/accounts?${query}`);
+    motherAccounts = Array.isArray(result.accounts) ? result.accounts : [];
+    const pagination = result.pagination || {};
+    motherPage = Number(pagination.page || 1);
+    motherTotalPages = Number(pagination.total_pages || 1);
+    renderMotherAccounts(motherAccounts);
+    document.querySelector('#mother-page-status').textContent = `第 ${motherPage}/${motherTotalPages} 页，共 ${pagination.total || 0} 个母号`;
+    document.querySelector('#mother-prev').disabled = motherPage <= 1;
+    document.querySelector('#mother-next').disabled = motherPage >= motherTotalPages;
+    document.querySelector('#account-count').textContent = pagination.total || 0;
+    if (showNotice) notify('母号列表已刷新');
+  } catch (error) {
+    document.querySelector('#mother-list-status').textContent = error.message;
+    if (showNotice) notify(error.message, true);
+  }
 }
 
 function readSavedAccounts() {
@@ -53,6 +180,12 @@ function saveAccounts(accounts) {
   savedAccounts = accounts.map(normalizeAccount);
   localStorage.setItem(accountsStorageKey, JSON.stringify(savedAccounts));
   localStorage.setItem(routesStorageKey, JSON.stringify(flattenLines(savedAccounts)));
+}
+
+function saveSplitDomains() {
+  const value = splitDomainInput.value.trim();
+  if (value) localStorage.setItem(splitDomainStorageKey, value);
+  else localStorage.removeItem(splitDomainStorageKey);
 }
 
 function parseCredentialLines(text) {
@@ -132,26 +265,68 @@ function renderSplitProgress(jobs = []) {
 
 function renderAccounts(accounts) {
   const rows = accounts.flatMap(account => account.addresses.length ? account.addresses.map(route => ({account, route})) : [{account, route: null}]);
-  document.querySelector('#account-count').textContent = accounts.length;
-  document.querySelector('#route-count').textContent = rows.filter(row => row.route).length;
   if (!rows.length) {
-    accountsBody.innerHTML = '<tr><td colspan="5" class="empty">导入账号后显示地址</td></tr>';
+    accountsBody.innerHTML = '<tr><td colspan="6" class="empty">导入账号后显示地址</td></tr>';
     document.querySelector('#table-status').textContent = '暂无已保存账号';
     return;
   }
   accountsBody.innerHTML = rows.map(({account, route}) => `
     <tr>
+      <td>${route ? `<input class="address-select" type="checkbox" data-address="${escapeHtml(route.address)}" data-url="${escapeHtml(route.url)}" aria-label="选择 ${escapeHtml(route.address)}">` : ''}</td>
+      <td>${escapeHtml(route?.address || account.email)}</td>
       <td>${escapeHtml(account.email)}</td>
-      <td>${escapeHtml(account.password || '—')}</td>
-      <td><span class="status ${statusClass(account.status)}">${escapeHtml(account.status)}</span></td>
+      <td><span class="status">${route?.address === account.email ? '母号' : '子号'}</span></td>
       <td>${route ? `<span class="route" title="${escapeHtml(route.url)}">${escapeHtml(route.url)}</span>` : '—'}</td>
-      <td>${route ? `<button class="copy" data-url="${escapeHtml(route.url)}">复制</button>` : '—'}</td>
+      <td>${route ? `<button class="copy" data-address="${escapeHtml(route.address)}" data-url="${escapeHtml(route.url)}">复制</button>` : '—'}</td>
     </tr>`).join('');
   accountsBody.querySelectorAll('.copy').forEach(button => button.addEventListener('click', async () => {
-    await navigator.clipboard.writeText(button.dataset.url);
-    notify('接码 URL 已复制');
+    await navigator.clipboard.writeText(`${button.dataset.address}----${button.dataset.url}`);
+    notify('邮箱和取码地址已复制');
   }));
+  document.querySelector('#address-select-all').checked = false;
   document.querySelector('#table-status').textContent = '结果已保存在当前浏览器';
+}
+
+function renderAddressRows(rows) {
+  if (!rows.length) {
+    accountsBody.innerHTML = '<tr><td colspan="6" class="empty">暂无接码地址</td></tr>';
+    document.querySelector('#table-status').textContent = '暂无接码地址';
+    return;
+  }
+  accountsBody.innerHTML = rows.map(route => `
+    <tr>
+      <td><input class="address-select" type="checkbox" data-address="${escapeHtml(route.address)}" data-url="${escapeHtml(route.url)}" aria-label="选择 ${escapeHtml(route.address)}"></td>
+      <td>${escapeHtml(route.address)}</td>
+      <td>${escapeHtml(route.mother_email)}</td>
+      <td><span class="status ${route.is_primary ? 'ready' : ''}">${escapeHtml(route.email_type)}</span></td>
+      <td><span class="route" title="${escapeHtml(route.url)}">${escapeHtml(route.url)}</span></td>
+      <td><button class="copy copy-address" data-address="${escapeHtml(route.address)}" data-url="${escapeHtml(route.url)}">复制</button></td>
+    </tr>`).join('');
+  accountsBody.querySelectorAll('.copy-address').forEach(button => button.addEventListener('click', async () => {
+    await navigator.clipboard.writeText(`${button.dataset.address}----${button.dataset.url}`);
+    notify('邮箱和取码地址已复制');
+  }));
+  document.querySelector('#address-select-all').checked = false;
+  document.querySelector('#table-status').textContent = `当前显示 ${rows.length} 条`;
+}
+
+async function refreshAddressRows(showNotice = true) {
+  try {
+    const result = await request(`/admin/addresses?page=${addressPage}&page_size=${sqlPageSize}`);
+    addressRows = Array.isArray(result.addresses) ? result.addresses : [];
+    const pagination = result.pagination || {};
+    addressPage = Number(pagination.page || 1);
+    addressTotalPages = Number(pagination.total_pages || 1);
+    renderAddressRows(addressRows);
+    document.querySelector('#address-page-status').textContent = `第 ${addressPage}/${addressTotalPages} 页，共 ${pagination.total || 0} 个地址`;
+    document.querySelector('#address-prev').disabled = addressPage <= 1;
+    document.querySelector('#address-next').disabled = addressPage >= addressTotalPages;
+    document.querySelector('#route-count').textContent = pagination.total || 0;
+    if (showNotice) notify('接码地址已刷新');
+  } catch (error) {
+    document.querySelector('#table-status').textContent = error.message;
+    if (showNotice) notify(error.message, true);
+  }
 }
 
 function escapeHtml(value) {
@@ -163,6 +338,8 @@ function routeForEmail(email) {
     const route = account.addresses.find(item => item.address.toLowerCase() === email.toLowerCase());
     if (route) return route;
   }
+  const serverRoute = addressRows.find(item => item.address.toLowerCase() === email.toLowerCase());
+  if (serverRoute) return serverRoute;
   return null;
 }
 
@@ -255,8 +432,60 @@ function stopHealthPolling() {
 
 document.querySelector('#refresh').addEventListener('click', () => {
   savedAccounts = readSavedAccounts();
-  renderAccounts(savedAccounts);
-  notify('已刷新浏览器保存结果');
+  motherPage = 1;
+  addressPage = 1;
+  refreshMotherAccounts(false);
+  refreshAddressRows(false);
+  notify('账号和接码地址已刷新');
+});
+
+document.querySelector('#refresh-mothers').addEventListener('click', () => {
+  refreshMotherAccounts();
+});
+
+function applyMotherFilter() {
+  motherSearch = document.querySelector('#mother-filter').value.trim().toLowerCase();
+  motherPage = 1;
+  refreshMotherAccounts(false);
+}
+
+document.querySelector('#mother-filter-submit').addEventListener('click', applyMotherFilter);
+document.querySelector('#mother-filter').addEventListener('keydown', event => {
+  if (event.key === 'Enter') applyMotherFilter();
+});
+document.querySelector('#mother-filter-clear').addEventListener('click', () => {
+  document.querySelector('#mother-filter').value = '';
+  motherSearch = '';
+  motherPage = 1;
+  refreshMotherAccounts(false);
+});
+
+document.querySelector('#mother-prev').addEventListener('click', () => {
+  if (motherPage > 1) {
+    motherPage -= 1;
+    refreshMotherAccounts(false);
+  }
+});
+
+document.querySelector('#mother-next').addEventListener('click', () => {
+  if (motherPage < motherTotalPages) {
+    motherPage += 1;
+    refreshMotherAccounts(false);
+  }
+});
+
+document.querySelector('#address-prev').addEventListener('click', () => {
+  if (addressPage > 1) {
+    addressPage -= 1;
+    refreshAddressRows(false);
+  }
+});
+
+document.querySelector('#address-next').addEventListener('click', () => {
+  if (addressPage < addressTotalPages) {
+    addressPage += 1;
+    refreshAddressRows(false);
+  }
 });
 
 document.querySelector('#import').addEventListener('click', async () => {
@@ -266,7 +495,8 @@ document.querySelector('#import').addEventListener('click', async () => {
   const verify = document.querySelector('#verify').checked;
   const useProxy = document.querySelector('#use-proxy').checked;
   const splitCount = Number(document.querySelector('#import-split-count').value || 0);
-  const splitDomain = document.querySelector('#import-split-domain').value.trim();
+  const splitDomain = splitDomainInput.value.trim();
+  saveSplitDomains();
   const randomDomainTlds = [
     document.querySelector('#random-com-domain').checked ? 'com' : '',
     document.querySelector('#random-net-domain').checked ? 'net' : '',
@@ -308,7 +538,7 @@ document.querySelector('#import').addEventListener('click', async () => {
         renderSplitProgress(splitJobs);
         renderAccounts(mergeAccounts(savedAccounts, freshAccounts));
         try {
-          const split = await request('/aliases/split', {
+          const split = await request('/admin/aliases/split', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({
@@ -367,6 +597,10 @@ document.querySelector('#import').addEventListener('click', async () => {
       }
     }
     saveAccounts(mergeAccounts(savedAccounts, freshAccounts));
+    motherPage = 1;
+    addressPage = 1;
+    refreshMotherAccounts(false);
+    refreshAddressRows(false);
     document.querySelector('#import-result').value = outputLines.join('\n');
     document.querySelector('#import-result-block').hidden = false;
     renderAccounts(savedAccounts);
@@ -392,7 +626,7 @@ document.querySelector('#save-proxy-pool').addEventListener('click', async () =>
   const proxyText = (proxyPoolInput?.value || '').trim();
   if (!proxyText) return notify('请先输入代理池内容', true);
   try {
-    const result = await request('/proxy-pool', {
+    const result = await request('/admin/proxy-pool', {
       method: 'POST',
       headers: {'Content-Type': 'text/plain; charset=utf-8'},
       body: proxyText,
@@ -407,18 +641,6 @@ document.querySelector('#save-proxy-pool').addEventListener('click', async () =>
   } catch (error) {
     notify(error.message, true);
   }
-});
-
-document.querySelector('#clear-routes').addEventListener('click', () => {
-  if (!savedAccounts.length) return notify('当前没有可清空的接码地址', true);
-  if (!confirm(`确定清空 ${savedAccounts.length} 个账号和所有接码地址吗？此操作只会清除当前浏览器保存的数据。`)) return;
-  savedAccounts = [];
-  localStorage.removeItem(accountsStorageKey);
-  localStorage.removeItem(routesStorageKey);
-  document.querySelector('#import-result').value = '';
-  document.querySelector('#import-result-block').hidden = true;
-  renderAccounts([]);
-  notify('已清空接码地址');
 });
 
 document.querySelector('#query').addEventListener('click', async () => {
@@ -461,5 +683,40 @@ document.querySelector('#export').addEventListener('click', async () => {
   } catch (error) { notify(error.message, true); }
 });
 
-renderAccounts(savedAccounts);
+document.querySelector('#copy-routes').addEventListener('click', async () => {
+  const lines = [...accountsBody.querySelectorAll('.address-select:checked')]
+    .map(checkbox => `${checkbox.dataset.address}----${checkbox.dataset.url}`);
+  if (!lines.length) return notify('请先勾选需要复制的接码地址', true);
+  await navigator.clipboard.writeText(lines.join('\n'));
+  notify(`已复制 ${lines.length} 条勾选地址`);
+});
+
+document.querySelector('#address-select-all').addEventListener('change', event => {
+  accountsBody.querySelectorAll('.address-select').forEach(checkbox => {
+    checkbox.checked = event.target.checked;
+  });
+});
+
+document.querySelector('#copy-mother-routes').addEventListener('click', async () => {
+  const lines = motherAccounts.flatMap(account => (account.addresses || [])
+    .map(route => `${route.address}----${route.url}`));
+  if (!lines.length) return notify('当前页没有可复制的母号或子号', true);
+  await navigator.clipboard.writeText(lines.join('\n'));
+  notify(`已复制当前页 ${lines.length} 条母号和子号地址`);
+});
+
+document.querySelector('#admin-login').addEventListener('click', authenticateAdmin);
+document.querySelector('#admin-token').addEventListener('keydown', event => {
+  if (event.key === 'Enter') authenticateAdmin();
+});
+
+splitDomainInput.value = localStorage.getItem(splitDomainStorageKey) || '';
+splitDomainInput.addEventListener('change', saveSplitDomains);
+splitDomainInput.addEventListener('blur', saveSplitDomains);
+
+setAdminAuthenticated(false);
+if (adminToken) {
+  document.querySelector('#admin-token').value = adminToken;
+  authenticateAdmin();
+}
 checkHealth();

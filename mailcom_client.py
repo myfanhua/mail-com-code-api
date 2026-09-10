@@ -11,7 +11,8 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import parse_qs, urljoin, urlparse, urlunparse
 
-import requests
+from curl_cffi import requests
+from curl_cffi.requests.exceptions import RequestException
 
 
 LOGIN_PAGE_URL = "https://www.mail.com/"
@@ -36,6 +37,7 @@ USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36"
 )
+HTTP_IMPERSONATE = os.getenv("MAIL_HTTP_IMPERSONATE", "chrome136")
 STATISTICS_RE = re.compile(r'name=["\']statistics["\'][^>]*value=["\']([^"\']*)', re.I)
 
 
@@ -69,7 +71,10 @@ class MailComClient:
         self.username = username.strip().lower()
         self.password = password
         self.timeout = timeout
-        self.session = requests.Session()
+        # mail.com checks the browser TLS/HTTP fingerprint during login.  A
+        # plain requests/urllib3 client is redirected to support.mail.com even
+        # when the same account and proxy work in a browser.
+        self.session = requests.Session(impersonate=HTTP_IMPERSONATE)
         self.session.headers.update({"User-Agent": USER_AGENT})
         # A proxy is an account property.  Reuse it for every upstream request;
         # rotation and fallback to another account's proxy are intentionally absent.
@@ -90,7 +95,7 @@ class MailComClient:
             "sid": self.sid,
             "auth_id": self.auth_id,
             "tokens": self.tokens,
-            "cookies": requests.utils.dict_from_cookiejar(self.session.cookies),
+            "cookies": self.session.cookies.get_dict(),
             "saved_at": int(time.time()),
         }
 
@@ -137,7 +142,7 @@ class MailComClient:
             if page.ok:
                 match = STATISTICS_RE.search(page.text)
                 statistics = match.group(1) if match else ""
-        except requests.RequestException:
+        except RequestException:
             # The login POST can still work when the marketing page is unavailable.
             pass
 
@@ -163,7 +168,7 @@ class MailComClient:
                 timeout=self.timeout,
                 headers={"Origin": LOGIN_PAGE_URL.rstrip("/"), "Referer": LOGIN_PAGE_URL},
             )
-        except requests.RequestException as exc:
+        except RequestException as exc:
             raise MailComError("无法连接 mail.com 登录服务", kind="network") from exc
 
         location = response.headers.get("Location", "")
@@ -183,7 +188,7 @@ class MailComClient:
         halogin = urlunparse((parsed.scheme, parsed.netloc, "/halogin", "", query, ""))
         try:
             exchanged = self.session.get(halogin, allow_redirects=False, timeout=self.timeout)
-        except requests.RequestException as exc:
+        except RequestException as exc:
             raise MailComError("无法完成 mail.com 会话交换", kind="network") from exc
         location = exchanged.headers.get("Location", "")
         sid = (parse_qs(urlparse(location).query).get("sid") or [""])[0]
@@ -237,7 +242,7 @@ class MailComClient:
                 timeout=self.timeout,
                 headers=self._oauth_headers(client_id),
             )
-        except requests.RequestException as exc:
+        except RequestException as exc:
             raise MailComError("无法连接 mail.com OAuth 服务", kind="network") from exc
         if response.status_code in (401, 403):
             raise MailComError("mail.com 会话已失效或被拒绝", kind="session_expired", status=401)
@@ -289,7 +294,7 @@ class MailComClient:
             response = self.session.post(
                 MAIL_LIST_URL, params=params, data=b"", headers=self._mail_headers(token), timeout=self.timeout
             )
-        except requests.RequestException as exc:
+        except RequestException as exc:
             raise MailComError("无法连接 mail.com 邮件列表服务", kind="network") from exc
         if response.status_code == 401:
             self.tokens.pop(self._token_key(MAIL_CLIENT_ID, MAIL_SCOPE), None)
@@ -298,7 +303,7 @@ class MailComClient:
                 response = self.session.post(
                     MAIL_LIST_URL, params=params, data=b"", headers=self._mail_headers(token), timeout=self.timeout
                 )
-            except requests.RequestException as exc:
+            except RequestException as exc:
                 raise MailComError("无法连接 mail.com 邮件列表服务", kind="network") from exc
         if response.status_code != 200:
             raise MailComError(f"查询收件箱失败 (HTTP {response.status_code})", kind="mail_query_failed")
@@ -338,7 +343,7 @@ class MailComClient:
                 headers={**self._mail_headers(token), "Accept": "text/plain"},
                 timeout=self.timeout,
             )
-        except requests.RequestException as exc:
+        except RequestException as exc:
             raise MailComError("无法连接 mail.com 邮件正文服务", kind="network") from exc
         if response.status_code != 200:
             raise MailComError(f"获取邮件正文失败 (HTTP {response.status_code})", kind="mail_body_failed")
@@ -392,7 +397,7 @@ class MailComClient:
                 headers=self._settings_headers(token, "application/json"),
                 timeout=self.timeout,
             )
-        except requests.RequestException as exc:
+        except RequestException as exc:
             raise MailComError("无法连接 mail.com 域名服务", kind="network") from exc
         if response.status_code != 200:
             raise MailComError(

@@ -15,6 +15,20 @@
 
 ## 本地启动
 
+Linux/macOS 可使用仓库内的单文件管理脚本启动、关闭或重启服务：
+
+```bash
+chmod +x service.sh
+./service.sh start
+./service.sh status
+./service.sh restart
+./service.sh stop
+```
+
+服务默认监听 `127.0.0.1:8988`，使用 `.venv/bin/python`（不存在时使用 `python3`），自动读取项目根目录下的 `.env`，PID 保存在 `.run/server.pid`，标准输出和错误输出统一写入 `logs/server.log`。持续查看日志可运行 `./service.sh logs`。
+
+Windows PowerShell 也可以直接启动：
+
 ```powershell
 cd D:\grokfree\mail-com-code-api
 & D:\grokfree\.venv\Scripts\python.exe server.py `
@@ -42,8 +56,10 @@ $body = @'
 first@mail.com----password-1
 second@mail.com----password-2----http://proxy-user:proxy-pass@proxy.example:8080
 '@
+$token = Get-Content .\data\admin.token -Raw
 Invoke-RestMethod -Method Post `
   -Uri 'http://127.0.0.1:8788/admin/import?verify=true&sync_aliases=true' `
+  -Headers @{Authorization = "Bearer $($token.Trim())"} `
   -ContentType 'text/plain; charset=utf-8' `
   -Body $body
 ```
@@ -100,13 +116,13 @@ curl 'https://mail-code.example.com/code/<access_key>'
 {"email":"first@mail.com","code":null,"mail":null}
 ```
 
-## 公开导入与验证
+## 导入与验证
 
-`POST /admin/import` 可直接导入邮箱密码；首次导入响应中的 `lines` 只应保存到调用方。之后用正确邮箱密码调用 `/auth/login`，服务才返回该邮箱的接码地址。错误密码不会返回地址。
+`POST /admin/import` 使用 `Authorization: Bearer <admin.token>` 导入邮箱密码；首次导入响应中的 `lines` 只应保存到调用方。之后用正确邮箱密码调用 `/auth/login`，服务才返回该邮箱的接码地址。错误密码不会返回地址。网页控制台同样需要先输入 `data/admin.token` 完成管理员验证，令牌保存在当前浏览器的 `localStorage` 中，之后打开页面会自动验证。
 
 | 方法 | 路径 | 用途 |
 |---|---|---|
-| `POST` | `/admin/import` | 批量导入并永久保存账号 |
+| `POST` | `/admin/import` | 管理员批量导入并永久保存账号 |
 | `POST` | `/auth/login` | 用邮箱密码验证并返回该邮箱 API 地址 |
 | `POST` | `/query` | 携带邮箱密码查询该账号验证码 |
 | `POST` | `/aliases/split` | 携带邮箱密码一次创建 1-9 个别名并返回独立 API，可选指定或随机分裂域名；会自动按账号总地址上限 10 裁剪 |
@@ -115,12 +131,14 @@ curl 'https://mail-code.example.com/code/<access_key>'
 
 | 方法 | 路径 | 用途 |
 |---|---|---|
-| `GET` | `/admin/accounts` | 查看账号、状态和生成 URL，不返回密码/token |
+| `GET` | `/admin/accounts?page=1&page_size=20` | SQL 分页查看母号、密码、状态和该母号的全部子号 |
+| `GET` | `/admin/addresses?page=1&page_size=20` | SQL 分页查看母号/子号及取码 URL，不返回密码 |
 | `GET` | `/admin/export` | 下载 `邮箱----接码API` |
 | `POST` | `/admin/check` | 登录与 token 连通性诊断 |
 | `POST` | `/admin/query` | 按邮箱批量匹配并查询验证码 |
 | `POST` | `/admin/aliases/sync` | 同步账号已有别名并生成 URL |
 | `POST` | `/admin/aliases` | 显式创建一个或多个 mail.com 别名并生成 URL |
+| `POST` | `/admin/aliases/split` | 网页控制台分裂别名（管理员验证） |
 
 检查账号：
 
@@ -152,7 +170,7 @@ curl 'https://mail-code.example.com/code/<access_key>'
 {"email":"first@mail.com","password":"password-1","count":3,"domain":"engineer.com"}
 ```
 
-`domain` 可选；不传时默认沿用账号邮箱域名。传入 `engineer.com` 时，生成的别名会变成 `原邮箱前缀-split-xxxx@engineer.com`。
+`domain` 可选；不传时默认沿用账号邮箱域名。子号名称默认随机组合常见英文名、姓氏、排列方式和数字，不包含母号前缀或固定的 `split` 标记，更接近真人邮箱格式。传入 `engineer.com` 时只固定域名部分，子号名称仍然随机生成。
 如果同时传 `domain` 和随机域名参数，优先使用手动指定的 `domain`。
 mail.com 当前按账号总地址数限制，上限约为 10 个；因为原始邮箱本身也占 1 个，所以通常最多还能新建 9 个别名。
 
@@ -197,4 +215,3 @@ curl http://127.0.0.1:8788/health
 & D:\grokfree\.venv\Scripts\python.exe -m unittest discover -s tests -v
 & D:\grokfree\.venv\Scripts\python.exe -m py_compile server.py storage.py mailcom_client.py code_extract.py
 ```
-

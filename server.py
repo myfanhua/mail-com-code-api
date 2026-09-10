@@ -78,6 +78,21 @@ MAIL_COM_DOMAINS_BY_TLD = {
 }
 MAIL_COM_MAX_ADDRESSES_PER_ACCOUNT = 10
 MAX_SPLIT_ALIASES = MAIL_COM_MAX_ADDRESSES_PER_ACCOUNT - 1
+ALIAS_FIRST_NAMES = (
+    "alex", "amelia", "ava", "benjamin", "charlotte", "chloe", "daniel", "david",
+    "ella", "emily", "emma", "ethan", "evelyn", "grace", "hannah", "henry",
+    "isabella", "jack", "james", "jasmine", "john", "joseph", "liam", "lily",
+    "lucas", "mason", "mia", "natalie", "noah", "nora", "olivia", "owen",
+    "ryan", "samuel", "sophia", "william", "zoe",
+)
+ALIAS_LAST_NAMES = (
+    "adams", "anderson", "baker", "bennett", "brooks", "brown", "campbell",
+    "carter", "clark", "collins", "cooper", "davis", "edwards", "evans",
+    "foster", "garcia", "green", "hall", "harris", "hill", "jackson",
+    "johnson", "king", "lee", "lewis", "martin", "miller", "mitchell",
+    "moore", "morgan", "nelson", "parker", "roberts", "scott", "smith",
+    "taylor", "thomas", "walker", "white", "wilson", "young",
+)
 
 
 class RateLimiter:
@@ -361,6 +376,16 @@ def parse_timestamp(value: str) -> float | None:
             raise ValueError("since 必须是 Unix 时间戳或 ISO-8601 时间") from exc
 
 
+def parse_pagination(query: str) -> tuple[int, int]:
+    params = parse_qs(query)
+    try:
+        page = max(1, int((params.get("page") or ["1"])[0]))
+        page_size = max(1, min(100, int((params.get("page_size") or ["20"])[0])))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("page 和 page_size 必须是正整数") from exc
+    return page, page_size
+
+
 class MailCodeApplication:
     def __init__(
         self,
@@ -567,7 +592,7 @@ class MailCodeApplication:
                 status=409,
             )
         count = min(count, remaining)
-        local, account_domain = account.email.rsplit("@", 1)
+        _local, account_domain = account.email.rsplit("@", 1)
         alias_domains = tuple(parse_split_domains(domain))
         random_domains: tuple[str, ...] = ()
         if random_domain_tlds and not alias_domains:
@@ -584,21 +609,42 @@ class MailCodeApplication:
                     kind="settings_failed",
                     status=502,
                 )
-        base = (prefix or local).strip().lower() or local
+        # 默认组合常见英文名和姓氏，并随机切换排列、分隔符及数字形式，
+        # 生成更接近真人邮箱且没有固定 split 标记的子号。
+        base = (prefix or "").strip().lower()
         if "@" in base:
-            base = base.split("@", 1)[0] or local
-        max_prefix_len = max(1, 64 - len("-split-") - 6)
-        base = base[:max_prefix_len]
+            base = base.split("@", 1)[0]
+        base = base[:32]
         routes: list[Address] = []
+        generated_locals: set[str] = set()
         for _ in range(count):
-            suffix = secrets.token_hex(3)
+            while True:
+                first = secrets.choice(ALIAS_FIRST_NAMES)
+                last = secrets.choice(ALIAS_LAST_NAMES)
+                short_number = str(10 + secrets.randbelow(90))
+                long_number = str(100 + secrets.randbelow(9900))
+                year = str(1980 + secrets.randbelow(27))
+                human_local = secrets.choice(
+                    (
+                        f"{first}.{last}{short_number}",
+                        f"{first}{last}{long_number}",
+                        f"{first[0]}{last}{short_number}",
+                        f"{last}.{first}{short_number}",
+                        f"{first}{last[0]}{year}",
+                        f"{first}.{last}{year}",
+                    )
+                )
+                alias_local = f"{base}.{human_local}" if base else human_local
+                if alias_local not in generated_locals:
+                    generated_locals.add(alias_local)
+                    break
             if alias_domains:
                 selected_domain = secrets.choice(alias_domains)
             elif random_domains:
                 selected_domain = secrets.choice(random_domains)
             else:
                 selected_domain = account_domain
-            address = f"{base}-split-{suffix}@{selected_domain}"
+            address = f"{alias_local}@{selected_domain}"
             routes.append(self.add_alias(account, address, verify_visible=False, validate=False))
         return routes
 
@@ -681,7 +727,49 @@ class MailCodeHandler(BaseHTTPRequestHandler):
         if parsed.path == "/admin/accounts":
             if not self.require_admin():
                 return
-            self.json_response(200, {"accounts": self.app.store.list_accounts()})
+            try:
+                page, page_size = parse_pagination(parsed.query)
+            except ValueError as exc:
+                self.json_response(400, {"error": "invalid_request", "detail": str(exc)})
+                return
+            account_params = parse_qs(parsed.query)
+            query = str((account_params.get("q") or [""])[0]).strip()[:254]
+            accounts, total = self.app.store.list_accounts_page(page, page_size, query)
+            self.json_response(
+                200,
+                {
+                    "accounts": accounts,
+                    "pagination": {
+                        "page": page,
+                        "page_size": page_size,
+                        "total": total,
+                        "total_pages": max(1, (total + page_size - 1) // page_size),
+                    },
+                    "query": query,
+                },
+            )
+            return
+        if parsed.path == "/admin/addresses":
+            if not self.require_admin():
+                return
+            try:
+                page, page_size = parse_pagination(parsed.query)
+            except ValueError as exc:
+                self.json_response(400, {"error": "invalid_request", "detail": str(exc)})
+                return
+            addresses, total = self.app.store.list_addresses_page(page, page_size)
+            self.json_response(
+                200,
+                {
+                    "addresses": addresses,
+                    "pagination": {
+                        "page": page,
+                        "page_size": page_size,
+                        "total": total,
+                        "total_pages": max(1, (total + page_size - 1) // page_size),
+                    },
+                },
+            )
             return
         if parsed.path == "/admin/proxy-pool":
             if not self.require_admin():
@@ -721,12 +809,16 @@ class MailCodeHandler(BaseHTTPRequestHandler):
                 self.json_response(exc.status, {"error": exc.kind, "detail": str(exc)})
             return
         if parsed.path == "/proxy-pool":
+            if not self.require_admin():
+                return
             try:
                 self.handle_proxy_pool(self.read_payload())
             except ValueError as exc:
                 self.json_response(400, {"error": "invalid_request", "detail": str(exc)})
             return
-        if parsed.path == "/aliases/split":
+        if parsed.path in {"/aliases/split", "/admin/aliases/split"}:
+            if parsed.path.startswith("/admin/") and not self.require_admin():
+                return
             payload = None
             try:
                 payload = self.read_payload()
@@ -785,7 +877,7 @@ class MailCodeHandler(BaseHTTPRequestHandler):
         if not parsed.path.startswith("/admin/"):
             self.json_response(404, {"error": "not_found"})
             return
-        if parsed.path != "/admin/import" and not self.require_admin():
+        if not self.require_admin():
             return
         try:
             payload = self.read_payload()
@@ -1224,4 +1316,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

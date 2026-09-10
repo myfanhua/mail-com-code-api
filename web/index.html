@@ -20,6 +20,19 @@
   </header>
 
   <main class="shell">
+    <section id="admin-access" class="access-strip">
+      <div>
+        <span class="section-kicker">ADMIN ACCESS</span>
+        <strong>管理员验证</strong>
+        <span id="admin-auth-status" class="muted">请输入 data/admin.token</span>
+      </div>
+      <div class="token-row">
+        <input id="admin-token" type="password" autocomplete="current-password" placeholder="粘贴 admin.token" aria-label="管理员令牌">
+        <button id="admin-login" class="button primary">验证</button>
+      </div>
+    </section>
+
+    <div id="admin-content" hidden>
     <section class="hero-row">
       <div>
         <span class="section-kicker">MAILBOX OPERATIONS</span>
@@ -41,7 +54,7 @@
           <label><input id="verify" type="checkbox" checked> 导入后立即验证 mail.com 登录</label>
           <label><input id="use-proxy" type="checkbox"> 使用代理</label>
           <label>每个账号分裂 <select id="import-split-count" aria-label="每个账号分裂数量"><option value="0">不分裂</option><option value="1">1 个</option><option value="2">2 个</option><option value="3">3 个</option><option value="4">4 个</option><option value="5">5 个</option><option value="6">6 个</option><option value="7">7 个</option><option value="8">8 个</option><option value="9">9 个</option></select></label>
-          <label>指定域名 <input id="import-split-domain" type="text" placeholder="engineer.com, comic.com" aria-label="指定分裂域名（可选，可输入多个）"></label>
+          <label>指定域名 <input id="import-split-domain" type="text" placeholder="engineer.com, comic.com" aria-label="指定分裂域名（可选，可输入多个）" title="自动保存在当前浏览器，下次导入时继续使用"></label>
           <label><input id="random-com-domain" type="checkbox"> 随机 .com 域名</label>
           <label><input id="random-net-domain" type="checkbox"> 随机 .net 域名</label>
         </div>
@@ -67,11 +80,11 @@
       </div>
     </section>
 
-    <section class="panel query-panel">
-      <div class="panel-head">
+    <details class="panel query-panel collapsible-panel">
+      <summary class="panel-head">
         <div><span class="section-kicker">02 / QUERY</span><h3>按邮箱批量查询验证码</h3></div>
         <span class="format-chip">自动匹配已保存地址</span>
-      </div>
+      </summary>
       <textarea id="query-emails" class="query-input" spellcheck="false" placeholder="输入邮箱，每行一个；也支持逗号分隔"></textarea>
       <div class="inline-actions">
         <label class="query-option">最大邮件年龄 <input id="max-age" type="number" min="0" value="600"> 秒</label>
@@ -79,13 +92,13 @@
         <span id="query-status" class="muted"></span>
       </div>
       <div class="query-results-wrap"><table class="query-results"><thead><tr><th>邮箱</th><th>验证码</th><th>主题</th><th>状态</th></tr></thead><tbody id="query-results"><tr><td colspan="4" class="empty">输入邮箱后查询</td></tr></tbody></table></div>
-    </section>
+    </details>
 
-    <section class="panel proxy-panel">
-      <div class="panel-head">
+    <details class="panel proxy-panel collapsible-panel">
+      <summary class="panel-head">
         <div><span class="section-kicker">03 / PROXY</span><h3>代理池</h3></div>
         <span id="proxy-pool-status" class="muted">未配置代理池</span>
-      </div>
+      </summary>
       <div class="proxy-grid">
         <div class="proxy-actions">
           <button id="save-proxy-pool" class="button primary">保存代理池</button>
@@ -93,27 +106,56 @@
         <textarea id="proxy-pool-input" class="query-input" spellcheck="false" placeholder="http://proxy-user:proxy-pass@proxy.example:8080&#10;host:port:user:pass&#10;# 每行一个代理"></textarea>
         <p class="muted">保存后会写入服务器上的代理池文件，并用于后续新账号分配。</p>
       </div>
+    </details>
+
+    <section class="table-section mother-section">
+      <div class="table-head">
+        <div><span class="section-kicker">04 / PARENTS</span><h3>母号列表</h3></div>
+        <div class="inline-actions">
+          <span id="mother-list-status" class="muted">尚未加载</span>
+          <button id="copy-mother-routes" class="button secondary">复制本页母号和子号</button>
+          <button id="refresh-mothers" class="button secondary">刷新母号</button>
+        </div>
+      </div>
+      <div class="mother-filter-bar">
+        <input id="mother-filter" type="search" placeholder="输入母号邮箱或子号邮箱" aria-label="按母号或子号邮箱过滤">
+        <button id="mother-filter-submit" class="button primary">查询</button>
+        <button id="mother-filter-clear" class="button secondary">清除</button>
+      </div>
+      <div id="mother-accounts" class="mother-accounts">
+        <div class="empty">暂无母号</div>
+      </div>
+      <div class="pagination">
+        <button id="mother-prev" class="button secondary">上一页</button>
+        <span id="mother-page-status" class="muted">第 1 页</span>
+        <button id="mother-next" class="button secondary">下一页</button>
+      </div>
     </section>
 
     <section class="table-section">
       <div class="table-head">
-        <div><span class="section-kicker">04 / ROUTES</span><h3>接码地址</h3></div>
+        <div><span class="section-kicker">05 / ROUTES</span><h3>接码地址</h3></div>
         <div class="inline-actions">
           <span id="table-status" class="muted">尚未连接</span>
-          <button id="clear-routes" class="button ghost">清空</button>
+          <button id="copy-routes" class="button secondary">复制勾选</button>
         </div>
       </div>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>邮箱</th><th>密码</th><th>分裂状态</th><th>接码API</th><th>操作</th></tr></thead>
-          <tbody id="accounts"><tr><td colspan="5" class="empty">导入账号后显示地址</td></tr></tbody>
+          <thead><tr><th><input id="address-select-all" type="checkbox" aria-label="全选本页接码地址"></th><th>接码邮箱</th><th>母邮箱</th><th>邮箱类型</th><th>接码API</th><th>操作</th></tr></thead>
+          <tbody id="accounts"><tr><td colspan="6" class="empty">导入账号后显示地址</td></tr></tbody>
         </table>
       </div>
+      <div class="pagination">
+        <button id="address-prev" class="button secondary">上一页</button>
+        <span id="address-page-status" class="muted">第 1 页</span>
+        <button id="address-next" class="button secondary">下一页</button>
+      </div>
     </section>
+    </div>
   </main>
 
   <div id="toast" class="toast" role="status"></div>
   <script src="/app.js"></script>
 </body>
 </html>
-

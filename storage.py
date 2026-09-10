@@ -282,6 +282,90 @@ class Store:
             )
         return list(grouped.values())
 
+    def list_accounts_page(
+        self, page: int, page_size: int, query: str = ""
+    ) -> tuple[list[dict[str, Any]], int]:
+        """按母号进行 SQL 分页，并返回该页母号的全部子号。"""
+        offset = (page - 1) * page_size
+        query = query.strip().lower()
+        where = ""
+        params: list[Any] = []
+        if query:
+            where = (
+                " WHERE lower(a.email) LIKE ? OR EXISTS ("
+                "SELECT 1 FROM addresses search_address "
+                "WHERE search_address.account_id=a.id AND lower(search_address.address) LIKE ?)"
+            )
+            pattern = f"%{query}%"
+            params.extend((pattern, pattern))
+        with self.connection() as conn:
+            total = int(
+                conn.execute(f"SELECT COUNT(*) FROM accounts a{where}", params).fetchone()[0]
+            )
+            account_rows = conn.execute(
+                "SELECT id,email,password_enc,status,last_error,created_at,updated_at,"
+                f"proxy_url_enc,proxy_assigned_at FROM accounts a{where} "
+                "ORDER BY id DESC LIMIT ? OFFSET ?",
+                (*params, page_size, offset),
+            ).fetchall()
+            account_ids = [int(row["id"]) for row in account_rows]
+            address_rows = []
+            if account_ids:
+                placeholders = ",".join("?" for _ in account_ids)
+                address_rows = conn.execute(
+                    f"SELECT account_id,address,access_key,is_primary FROM addresses "
+                    f"WHERE account_id IN ({placeholders}) ORDER BY account_id,is_primary DESC,address",
+                    account_ids,
+                ).fetchall()
+
+        addresses_by_account: dict[int, list[dict[str, Any]]] = {account_id: [] for account_id in account_ids}
+        for row in address_rows:
+            addresses_by_account[int(row["account_id"])].append(
+                {
+                    "address": str(row["address"]),
+                    "is_primary": bool(row["is_primary"]),
+                    "url": self.code_url(str(row["access_key"])),
+                }
+            )
+        accounts = [
+            {
+                "id": int(row["id"]),
+                "email": str(row["email"]),
+                "password": self._decrypt_text(row["password_enc"]),
+                "status": str(row["status"]),
+                "last_error": str(row["last_error"]),
+                "created_at": str(row["created_at"]),
+                "updated_at": str(row["updated_at"]),
+                "proxy_bound": bool(self._decrypt_text(row["proxy_url_enc"])),
+                "proxy_assigned_at": str(row["proxy_assigned_at"] or ""),
+                "addresses": addresses_by_account[int(row["id"])],
+            }
+            for row in account_rows
+        ]
+        return accounts, total
+
+    def list_addresses_page(self, page: int, page_size: int) -> tuple[list[dict[str, Any]], int]:
+        """按接码地址进行 SQL 分页，不返回母号密码。"""
+        offset = (page - 1) * page_size
+        with self.connection() as conn:
+            total = int(conn.execute("SELECT COUNT(*) FROM addresses").fetchone()[0])
+            rows = conn.execute(
+                "SELECT d.address,d.access_key,d.is_primary,a.email AS mother_email "
+                "FROM addresses d JOIN accounts a ON a.id=d.account_id "
+                "ORDER BY a.id DESC,d.is_primary DESC,d.address LIMIT ? OFFSET ?",
+                (page_size, offset),
+            ).fetchall()
+        return [
+            {
+                "address": str(row["address"]),
+                "mother_email": str(row["mother_email"]),
+                "email_type": "母号" if bool(row["is_primary"]) else "子号",
+                "is_primary": bool(row["is_primary"]),
+                "url": self.code_url(str(row["access_key"])),
+            }
+            for row in rows
+        ], total
+
     def update_session(self, account_id: int, session: dict[str, Any], *, status: str = "ready", error: str = "") -> None:
         encoded = self._encrypt_text(json.dumps(session, separators=(",", ":")))
         with self._write_lock, self.connection() as conn:
