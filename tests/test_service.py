@@ -281,6 +281,32 @@ class TokenTests(unittest.TestCase):
             client.ensure_mail_token()
         self.assertEqual(client.login_calls, 0)
 
+    def test_fresh_login_retries_oauth_session_propagation_without_relogin(self):
+        class DelayedOAuthClient(MailComClient):
+            def __init__(self):
+                super().__init__("user@mail.com", "secret")
+                self.sid = "stale"
+                self.login_calls = 0
+                self.token_calls = 0
+
+            def login(self, retries: int = 3) -> None:
+                self.login_calls += 1
+                self.sid = "fresh"
+
+            def get_token(self, scope: str, client_id: str, *, force: bool = False) -> str:
+                self.token_calls += 1
+                if self.token_calls <= 3:
+                    raise MailComError("NO_SESSION", kind="session_expired")
+                return "fresh-token"
+
+        client = DelayedOAuthClient()
+        with mock.patch("mailcom_client.time.sleep") as sleep:
+            self.assertEqual(client.ensure_mail_token(), "fresh-token")
+
+        self.assertEqual(client.login_calls, 1)
+        self.assertEqual(client.token_calls, 4)
+        self.assertEqual(sleep.call_count, 2)
+
     def test_oauth_no_session_error_is_classified_as_expired_session(self):
         client = MailComClient("user@mail.com", "secret")
         client.sid = "stale"
@@ -572,6 +598,10 @@ class CodeFetchTests(unittest.TestCase):
 
 
 class ProxyClientTests(unittest.TestCase):
+    def test_impersonation_does_not_mix_in_a_different_chrome_user_agent(self):
+        client = MailComClient("user@mail.com", "secret")
+        self.assertNotIn("User-Agent", client.session.headers)
+
     def test_client_uses_account_proxy_for_all_requests(self):
         client = MailComClient(
             "user@mail.com",

@@ -37,11 +37,8 @@ SETTINGS_CLIENT_ID = "mailcom_mailset_root_live"
 # rotations without changing the client code.
 OAUTH_PUBLIC_SECRET = os.getenv("MAIL_OAUTH_PUBLIC_SECRET", "*******")
 
-USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36"
-)
 HTTP_IMPERSONATE = os.getenv("MAIL_HTTP_IMPERSONATE", "chrome136")
+HTTP_USER_AGENT = os.getenv("MAIL_HTTP_USER_AGENT", "").strip()
 STATISTICS_RE = re.compile(r'name=["\']statistics["\'][^>]*value=["\']([^"\']*)', re.I)
 
 
@@ -79,7 +76,11 @@ class MailComClient:
         # plain requests/urllib3 client is redirected to support.mail.com even
         # when the same account and proxy work in a browser.
         self.session = requests.Session(impersonate=HTTP_IMPERSONATE)
-        self.session.headers.update({"User-Agent": USER_AGENT})
+        # 默认让 curl_cffi 根据 impersonate 配置生成一致的 User-Agent、
+        # Client Hints 和 TLS 指纹。此前 TLS 模拟 Chrome 136，却手动发送
+        # Chrome 151 UA，确实会形成可识别的指纹矛盾。
+        if HTTP_USER_AGENT:
+            self.session.headers.update({"User-Agent": HTTP_USER_AGENT})
         # A proxy is an account property.  Reuse it for every upstream request;
         # rotation and fallback to another account's proxy are intentionally absent.
         self.proxy_url = proxy_url.strip()
@@ -179,8 +180,12 @@ class MailComClient:
         if response.status_code == 429:
             raise MailComError("mail.com 登录频率受限", kind="rate_limited", status=429)
         if response.status_code == 403:
-            network = "当前绑定代理" if self.proxy_url else "服务器公网 IP（账号未绑定代理）"
-            raise MailComError(f"mail.com 拒绝了{network}的登录请求", kind="blocked", status=403)
+            network = "当前绑定代理" if self.proxy_url else "服务器公网 IP"
+            raise MailComError(
+                f"mail.com 暂时拒绝了{network}的本次登录请求（可能触发登录频率风控）",
+                kind="blocked",
+                status=403,
+            )
         if response.status_code in (302, 303) and "ott=" not in location:
             kind = "bad_credentials" if "logout?ls=wd" in location else "login_redirect"
             raise MailComError("登录未返回一次性令牌", kind=kind, status=401)
@@ -296,7 +301,21 @@ class MailComClient:
             self.sid = ""
             self.tokens.clear()
             self.login()
-            return self.get_token(MAIL_SCOPE, MAIL_CLIENT_ID, force=True)
+            return self._get_token_after_fresh_login(MAIL_SCOPE, MAIL_CLIENT_ID)
+
+    def _get_token_after_fresh_login(self, scope: str, client_id: str) -> str:
+        """halogin 后 OAuth 会话可能短暂尚未同步，只重试 token，不重复登录。"""
+        last_error: MailComError | None = None
+        for attempt, delay in enumerate((0.0, 0.75, 1.5, 3.0), 1):
+            if delay:
+                time.sleep(delay)
+            try:
+                return self.get_token(scope, client_id, force=True)
+            except MailComError as exc:
+                last_error = exc
+                if exc.kind != "session_expired" or attempt == 4:
+                    raise
+        raise last_error or MailComError("token 刷新失败", kind="oauth_failed")
 
     def _mail_headers(self, token: str) -> dict[str, str]:
         return {
@@ -406,7 +425,7 @@ class MailComClient:
             self.sid = ""
             self.tokens.clear()
             self.login()
-            return self.get_token(SETTINGS_SCOPE, SETTINGS_CLIENT_ID, force=True)
+            return self._get_token_after_fresh_login(SETTINGS_SCOPE, SETTINGS_CLIENT_ID)
 
     def list_aliases(self) -> list[str]:
         token = self.ensure_settings_token()

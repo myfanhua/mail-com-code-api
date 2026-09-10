@@ -133,13 +133,15 @@ curl 'https://mail-code.example.com/code/<access_key>'
 - `code_fetch_empty` / `code_fetch_failed`：未取到或上游请求失败的具体阶段。
 - `code_request_finished`：最终结果和轮询次数。
 
-如果日志中同时出现 `proxy_bound:false` 和 `error:"blocked"`，表示账号实际使用的是服务器公网 IP，mail.com 已拒绝该机房网络，并不是验证码筛选问题。应先在代理池中保存代理，然后重新导入该母号并勾选“使用代理”；已有但尚未绑定代理的母号会在重新导入时领取代理。导入文本中直接填写的行内代理始终生效，不依赖“使用代理”复选框，例如：
+如果日志中同时出现 `proxy_bound:false` 和 `error:"blocked"`，表示该次自动重新登录实际使用的是服务器公网 IP，并被 mail.com 临时拒绝。这不代表该 IP 永久无法登录：导入验证可能成功，但短时间反复刷新会话仍可能触发登录频率风控。服务会在一次登录后等待 OAuth 会话同步并只重试 token，不会连续重复提交账号密码。如果服务器公网 IP 持续被拒绝，可在代理池中保存代理，然后重新导入该母号并勾选“使用代理”；已有但尚未绑定代理的母号会在重新导入时领取代理。导入文本中直接填写的行内代理始终生效，不依赖“使用代理”复选框，例如：
 
 ```text
 first@mail.com----password----http://proxy-user:proxy-pass@proxy.example:8080
 ```
 
-`OAuthBridge.NO_SESSION` 会被识别为会话过期并自动重新登录；其他 OAuth 配置错误不会反复触发登录，避免把服务器 IP 或代理打入 mail.com 风控。
+`OAuthBridge.NO_SESSION` 会被识别为会话过期并自动重新登录。刚登录后的 OAuth 会话可能存在短暂同步延迟，此时服务只重试 token；其他 OAuth 配置错误不会反复触发登录，避免把服务器 IP 或代理打入 mail.com 风控。
+
+HTTP 指纹由 `curl_cffi` 的 `MAIL_HTTP_IMPERSONATE` 统一生成。默认不要设置 `MAIL_HTTP_USER_AGENT`；手动设置时必须与模拟的浏览器版本一致，否则会出现 TLS 模拟版本、User-Agent 和 Client Hints 相互矛盾的情况。
 
 ## 导入与验证
 
