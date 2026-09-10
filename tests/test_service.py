@@ -177,6 +177,13 @@ class CodeExtractionTests(unittest.TestCase):
     def test_reverse_context(self):
         self.assertEqual(extract_code("654321 is your login code", ""), "654321")
 
+    def test_japanese_verification_code_wins_over_tracking_numbers(self):
+        body = (
+            "この一時検証コードを入力して続行してください: 482913 "
+            "https://example.com/click/20260910/ref/778899"
+        )
+        self.assertEqual(extract_code("ChatGPT 用の一時ログインコード", body), "482913")
+
 
 class TokenTests(unittest.TestCase):
     def test_mailcom_millisecond_expiry(self):
@@ -219,6 +226,23 @@ class TokenTests(unittest.TestCase):
 
         self.assertEqual(client.ensure_mail_token(), "fresh-token")
         self.assertEqual(client.login_calls, 1)
+
+    def test_delete_alias_uses_mailcom_removal_action(self):
+        client = MailComClient("user@mail.com", "secret")
+        response = mock.Mock(status_code=204)
+        client.session.post = mock.Mock(return_value=response)
+        client.ensure_settings_token = mock.Mock(return_value="settings-token")
+
+        client.delete_alias("Child+One@Engineer.com")
+
+        args, kwargs = client.session.post.call_args
+        self.assertTrue(
+            args[0].endswith(
+                "/emailAddressesRemovals/child%2Bone%40engineer.com/removals"
+            )
+        )
+        self.assertEqual(kwargs["params"], {"absoluteURI": "false"})
+        self.assertEqual(kwargs["headers"]["Content-Type"], "text/plain;charset=UTF-8")
 
 
 class StorageTests(unittest.TestCase):
@@ -273,6 +297,18 @@ class StorageTests(unittest.TestCase):
             self.assertNotIn("password", addresses[0])
             self.assertIn(addresses[0]["email_type"], {"母号", "子号"})
 
+    def test_child_and_parent_deletion(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(Path(tmp), "https://codes.example")
+            primary = store.upsert_account("parent@mail.com", "secret")
+            store.add_address(primary.account_id, "child@engineer.com")
+
+            self.assertFalse(store.delete_address(primary.account_id, "parent@mail.com"))
+            self.assertTrue(store.delete_address(primary.account_id, "child@engineer.com"))
+            self.assertIsNone(store.get_by_address("child@engineer.com"))
+            self.assertTrue(store.delete_account(primary.account_id))
+            self.assertIsNone(store.get_account(primary.account_id))
+
     def test_proxy_binding_is_encrypted_and_immutable(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = Store(Path(tmp), "https://codes.example")
@@ -290,6 +326,68 @@ class StorageTests(unittest.TestCase):
                 store.upsert_account(
                     "user@mail.com", "secret", "http://other.example:1000"
                 )
+
+
+class DeleteTests(unittest.TestCase):
+    def test_delete_child_removes_upstream_before_local_route(self):
+        calls = []
+
+        class FakeClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def delete_alias(self, address):
+                calls.append(address)
+
+            def export_state(self):
+                return {"sid": "updated"}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(Path(tmp), "https://codes.example")
+            primary = store.upsert_account("parent@mail.com", "secret")
+            store.add_address(primary.account_id, "child@engineer.com")
+            account = store.get_account(primary.account_id)
+            app = MailCodeApplication(
+                store, "admin-token", client_factory=FakeClient
+            )
+
+            app.delete_alias(account, "child@engineer.com")
+
+            self.assertEqual(calls, ["child@engineer.com"])
+            self.assertIsNone(store.get_by_address("child@engineer.com"))
+            self.assertEqual(store.get_account(primary.account_id).session["sid"], "updated")
+
+    def test_delete_child_keeps_local_route_when_upstream_fails(self):
+        class FakeClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def delete_alias(self, address):
+                raise MailComError("upstream failed", kind="alias_delete_failed")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(Path(tmp), "https://codes.example")
+            primary = store.upsert_account("parent@mail.com", "secret")
+            store.add_address(primary.account_id, "child@engineer.com")
+            account = store.get_account(primary.account_id)
+            app = MailCodeApplication(
+                store, "admin-token", client_factory=FakeClient
+            )
+
+            with self.assertRaises(MailComError):
+                app.delete_alias(account, "child@engineer.com")
+
+            self.assertIsNotNone(store.get_by_address("child@engineer.com"))
+
+    def test_primary_address_cannot_be_deleted_as_child(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(Path(tmp), "https://codes.example")
+            primary = store.upsert_account("parent@mail.com", "secret")
+            account = store.get_account(primary.account_id)
+            app = MailCodeApplication(store, "admin-token")
+
+            with self.assertRaisesRegex(ValueError, "母号不能"):
+                app.delete_alias(account, "parent@mail.com")
 
 
 class ProxyClientTests(unittest.TestCase):

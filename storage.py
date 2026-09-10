@@ -249,6 +249,26 @@ class Store:
             for row in rows
         ]
 
+    def delete_address(self, account_id: int, address: str) -> bool:
+        """删除一个非主地址；母号只能通过 delete_account 删除。"""
+        with self._write_lock, self.connection() as conn:
+            cursor = conn.execute(
+                "DELETE FROM addresses WHERE account_id=? AND lower(address)=? AND is_primary=0",
+                (account_id, address.strip().lower()),
+            )
+            deleted = cursor.rowcount > 0
+        if deleted:
+            self.write_export()
+        return deleted
+
+    def delete_account(self, account_id: int) -> bool:
+        with self._write_lock, self.connection() as conn:
+            cursor = conn.execute("DELETE FROM accounts WHERE id=?", (account_id,))
+            deleted = cursor.rowcount > 0
+        if deleted:
+            self.write_export()
+        return deleted
+
     def list_accounts(self) -> list[dict[str, Any]]:
         with self.connection() as conn:
             rows = conn.execute(

@@ -15,6 +15,8 @@
 .mother-meta{margin-left:auto;color:var(--muted);font-size:12px}
 .mother-children{padding:0 10px 12px 34px}
 .mother-child-row{display:grid;grid-template-columns:minmax(190px,1fr) minmax(260px,2fr) auto;align-items:center;gap:14px;padding:10px 12px;background:#f7fbfa;border-top:1px solid var(--line)}
+.mother-child-actions{display:flex;align-items:center;gap:8px}
+.copy.danger{color:var(--red)}
 .mother-empty{padding:18px}
 @media(max-width:760px){.mother-account summary{align-items:flex-start;flex-wrap:wrap}.mother-email{min-width:0;width:100%}.mother-meta{margin-left:0}.mother-children{padding-left:10px}.mother-child-row{grid-template-columns:minmax(0,1fr) auto}.mother-child-row .route{grid-column:1/-1;grid-row:2}}
 .pagination{display:flex;align-items:center;justify-content:flex-end;gap:12px;margin-top:16px}

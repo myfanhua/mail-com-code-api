@@ -9,7 +9,7 @@ import re
 import time
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import parse_qs, urljoin, urlparse, urlunparse
+from urllib.parse import parse_qs, quote, urljoin, urlparse, urlunparse
 
 from curl_cffi import requests
 from curl_cffi.requests.exceptions import RequestException
@@ -21,6 +21,10 @@ OAUTH_URL = "https://oauthbridge.navigator-lxa.mail.com/navigator/oauth2/token"
 MAIL_LIST_URL = "https://maillist.mail.com/Mailbox/Mail"
 MAIL_BODY_URL = "https://webmail-cats-live.mail.com/mailbox/primary/mailbody/{mail_id}/Body"
 SETTINGS_ADDRESSES_URL = "https://settings-cats.mail.com/mailaccount/primary/emailAddresses"
+SETTINGS_ADDRESS_REMOVALS_URL = (
+    "https://settings-cats.mail.com/mailaccount/primary/"
+    "emailAddressesRemovals/{address}/removals"
+)
 SETTINGS_VALIDATE_URL = "https://settings-cats.mail.com/mailaccount/emailAddressValidations"
 SETTINGS_DOMAINS_URL = "https://settings-cats.mail.com/domains"
 
@@ -453,5 +457,27 @@ class MailComClient:
             raise MailComError(
                 f"添加邮箱地址失败 (HTTP {response.status_code})",
                 kind=kind,
+                status=response.status_code,
+            )
+
+    def delete_alias(self, address: str) -> None:
+        address = address.strip().lower()
+        token = self.ensure_settings_token()
+        try:
+            # mail.com 网页端使用 removal 动作，而不是对 emailAddresses 做 DELETE。
+            response = self.session.post(
+                SETTINGS_ADDRESS_REMOVALS_URL.format(
+                    address=quote(address, safe="")
+                ),
+                params={"absoluteURI": "false"},
+                headers=self._settings_headers(token, "text/plain;charset=UTF-8"),
+                timeout=self.timeout,
+            )
+        except RequestException as exc:
+            raise MailComError("无法连接 mail.com 删除子号服务", kind="network") from exc
+        if not 200 <= response.status_code < 300:
+            raise MailComError(
+                f"删除邮箱地址失败 (HTTP {response.status_code})",
+                kind="alias_delete_failed",
                 status=response.status_code,
             )

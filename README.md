@@ -139,6 +139,8 @@ curl 'https://mail-code.example.com/code/<access_key>'
 | `POST` | `/admin/aliases/sync` | 同步账号已有别名并生成 URL |
 | `POST` | `/admin/aliases` | 显式创建一个或多个 mail.com 别名并生成 URL |
 | `POST` | `/admin/aliases/split` | 网页控制台分裂别名（管理员验证） |
+| `POST` | `/admin/aliases/delete` | 删除 mail.com 子号并删除本地取码地址 |
+| `POST` | `/admin/accounts/delete` | 从本系统删除母号及其全部本地数据 |
 
 检查账号：
 

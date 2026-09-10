@@ -7,11 +7,13 @@ import re
 
 
 CONTEXT_RE = re.compile(
-    r"(?:verification|verify|security|login|one[- ]time|otp|code|验证码|校验码|动态码|一次性)[^0-9]{0,50}([0-9]{4,8})",
+    r"(?:verification|verify|security|login|one[- ]time|otp|code|验证码|校验码|动态码|一次性|"
+    r"一時検証コード|検証コード|認証コード|ログインコード|確認コード|ワンタイムコード)[^0-9]{0,50}([0-9]{4,8})",
     re.IGNORECASE,
 )
 REVERSE_CONTEXT_RE = re.compile(
-    r"([0-9]{4,8})[^0-9]{0,30}(?:verification|verify|security|login|one[- ]time|otp|code|验证码|校验码|动态码|一次性)",
+    r"([0-9]{4,8})[^0-9]{0,30}(?:verification|verify|security|login|one[- ]time|otp|code|验证码|校验码|动态码|一次性|"
+    r"一時検証コード|検証コード|認証コード|ログインコード|確認コード|ワンタイムコード)",
     re.IGNORECASE,
 )
 GENERIC_RE = re.compile(r"(?<![0-9])[0-9]{4,8}(?![0-9])")
@@ -25,4 +27,3 @@ def extract_code(subject: str, body: str) -> str | None:
             return match.group(1)
     candidates = list(dict.fromkeys(GENERIC_RE.findall(text)))
     return candidates[0] if len(candidates) == 1 else None
-

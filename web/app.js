@@ -122,6 +122,8 @@ function renderMotherAccounts(accounts) {
         <summary>
           <span class="mother-email">${escapeHtml(account.email)}</span>
           <button class="copy copy-mother-group" data-account-id="${escapeHtml(account.id)}">复制母号和子号</button>
+          <button class="copy split-mother" data-account-id="${escapeHtml(account.id)}">分裂</button>
+          <button class="copy danger delete-mother" data-account-id="${escapeHtml(account.id)}">删除母号</button>
           <span class="mother-password">密码：${escapeHtml(account.password || '—')}</span>
           <span class="status ${statusClass(account.status)}">${escapeHtml(account.status || '未知')}</span>
           <span class="mother-meta">子号 ${children.length} 个 · ${account.proxy_bound ? '已绑定代理' : '未绑定代理'}</span>
@@ -131,7 +133,10 @@ function renderMotherAccounts(accounts) {
             <div class="mother-child-row">
               <span>${escapeHtml(route.address)}</span>
               <span class="route" title="${escapeHtml(route.url)}">${escapeHtml(route.url)}</span>
-              <button class="copy copy-child" data-address="${escapeHtml(route.address)}" data-url="${escapeHtml(route.url)}">复制</button>
+              <span class="mother-child-actions">
+                <button class="copy copy-child" data-address="${escapeHtml(route.address)}" data-url="${escapeHtml(route.url)}">复制</button>
+                <button class="copy danger delete-child" data-account-id="${escapeHtml(account.id)}" data-address="${escapeHtml(route.address)}">删除</button>
+              </span>
             </div>
           `).join('') : '<div class="empty mother-empty">该母号暂无子号</div>'}
         </div>
@@ -149,6 +154,92 @@ function renderMotherAccounts(accounts) {
     if (!lines.length) return notify('该母号没有可复制的取码地址', true);
     if (!await copyText(lines.join('\n'))) return;
     notify(`已复制该母号及其 ${Math.max(0, lines.length - 1)} 个子号`);
+  }));
+  container.querySelectorAll('.split-mother').forEach(button => button.addEventListener('click', async event => {
+    event.preventDefault();
+    event.stopPropagation();
+    const account = motherAccounts.find(item => String(item.id) === button.dataset.accountId);
+    if (!account) return;
+    const rawCount = window.prompt(`为 ${account.email} 创建几个子号？请输入 1-9：`, '1');
+    if (rawCount === null) return;
+    const count = Number(rawCount);
+    if (!Number.isInteger(count) || count < 1 || count > 9) return notify('分裂数量必须是 1-9', true);
+    const cachedDomains = localStorage.getItem(splitDomainStorageKey) || '';
+    const domain = window.prompt('指定域名（可留空沿用母号域名，多个用逗号分隔）：', cachedDomains);
+    if (domain === null) return;
+    if (domain.trim()) {
+      splitDomainInput.value = domain.trim();
+      saveSplitDomains();
+    }
+    button.disabled = true;
+    try {
+      const result = await request('/admin/aliases/split', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          email: account.email,
+          password: account.password,
+          count,
+          ...(domain.trim() ? {domain: domain.trim()} : {}),
+        }),
+      });
+      motherPage = 1;
+      addressPage = 1;
+      await Promise.all([refreshMotherAccounts(false), refreshAddressRows(false)]);
+      notify(`已为 ${account.email} 创建 ${result.created || 0} 个子号`);
+    } catch (error) {
+      notify(error.message, true);
+    } finally {
+      button.disabled = false;
+    }
+  }));
+  container.querySelectorAll('.delete-child').forEach(button => button.addEventListener('click', async event => {
+    event.preventDefault();
+    event.stopPropagation();
+    const account = motherAccounts.find(item => String(item.id) === button.dataset.accountId);
+    if (!account || !confirm(`确定删除子号 ${button.dataset.address} 吗？`)) return;
+    button.disabled = true;
+    try {
+      await request('/admin/aliases/delete', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({account: account.id, address: button.dataset.address}),
+      });
+      savedAccounts.forEach(item => {
+        if (item.email === account.email) {
+          item.addresses = item.addresses.filter(route => route.address !== button.dataset.address);
+        }
+      });
+      saveAccounts(savedAccounts);
+      await Promise.all([refreshMotherAccounts(false), refreshAddressRows(false)]);
+      notify('子号已删除');
+    } catch (error) {
+      notify(error.message, true);
+      button.disabled = false;
+    }
+  }));
+  container.querySelectorAll('.delete-mother').forEach(button => button.addEventListener('click', async event => {
+    event.preventDefault();
+    event.stopPropagation();
+    const account = motherAccounts.find(item => String(item.id) === button.dataset.accountId);
+    if (!account || !confirm(`确定从系统中删除母号 ${account.email} 及其所有本地子号和取码地址吗？`)) return;
+    button.disabled = true;
+    try {
+      await request('/admin/accounts/delete', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({account: account.id}),
+      });
+      savedAccounts = savedAccounts.filter(item => item.email !== account.email);
+      saveAccounts(savedAccounts);
+      motherPage = 1;
+      addressPage = 1;
+      await Promise.all([refreshMotherAccounts(false), refreshAddressRows(false)]);
+      notify('母号及其本地数据已删除');
+    } catch (error) {
+      notify(error.message, true);
+      button.disabled = false;
+    }
   }));
   const childCount = accounts.reduce(
     (sum, account) => sum + (account.addresses || []).filter(route => !route.is_primary).length,

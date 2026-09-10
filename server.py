@@ -567,6 +567,27 @@ class MailCodeApplication:
             self.store.update_session(account.id, client.export_state(), status="ready")
             return routes
 
+    def delete_alias(self, account: Account, address: str) -> None:
+        with self.account_lock(account.id):
+            found = self.store.get_by_address(address)
+            if not found or found[0].id != account.id:
+                raise ValueError("子号不属于该母号")
+            if found[1].is_primary:
+                raise ValueError("母号不能作为子号删除")
+            client = self.client_for(account)
+            client.delete_alias(found[1].address)
+            self.store.delete_address(account.id, found[1].address)
+            self.store.update_session(account.id, client.export_state(), status="ready")
+
+    def delete_account(self, account: Account) -> None:
+        # 与该母号的取码、同步和分裂操作串行，避免删除过程中又写回会话或子号。
+        with self.account_lock(account.id):
+            if not self.store.delete_account(account.id):
+                raise ValueError("母号不存在")
+        if account.proxy_url:
+            with self._proxy_pool_lock:
+                self._assigned_proxies.discard(account.proxy_url)
+
     def list_alias_domains(self, account: Account) -> list[str]:
         with self.account_lock(account.id):
             client = self.client_for(account)
@@ -909,6 +930,10 @@ class MailCodeHandler(BaseHTTPRequestHandler):
                 self.handle_alias(payload)
             elif parsed.path == "/admin/aliases/sync":
                 self.handle_alias_sync(payload)
+            elif parsed.path == "/admin/aliases/delete":
+                self.handle_alias_delete(payload)
+            elif parsed.path == "/admin/accounts/delete":
+                self.handle_account_delete(payload)
             elif parsed.path == "/admin/proxy-pool":
                 self.handle_proxy_pool(payload)
             elif parsed.path == "/admin/query":
@@ -1116,6 +1141,24 @@ class MailCodeHandler(BaseHTTPRequestHandler):
                 ],
             },
         )
+
+    def handle_alias_delete(self, payload: Any) -> None:
+        if not isinstance(payload, dict):
+            raise ValueError("JSON 对象中需要 account 和 address 字段")
+        account = self.find_account(payload.get("account"))
+        address = str(payload.get("address") or "").strip().lower()
+        if not address:
+            raise ValueError("缺少待删除的子号")
+        self.app.delete_alias(account, address)
+        self.json_response(200, {"deleted": True, "account": account.email, "address": address})
+
+    def handle_account_delete(self, payload: Any) -> None:
+        if not isinstance(payload, dict):
+            raise ValueError("JSON 对象中需要 account 字段")
+        account = self.find_account(payload.get("account"))
+        email = account.email
+        self.app.delete_account(account)
+        self.json_response(200, {"deleted": True, "account": email})
 
     def handle_proxy_pool(self, payload: Any) -> None:
         proxies = parse_proxy_pool_text(payload)
