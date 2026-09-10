@@ -5,6 +5,7 @@ const routesStorageKey = 'mail-code-routes';
 const adminTokenStorageKey = 'mail-code-admin-token';
 const splitDomainStorageKey = 'mail-code-split-domains';
 const splitExcludeDomainStorageKey = 'mail-code-split-exclude-domains';
+const motherSplitConfigStorageKey = 'mail-code-mother-split-config';
 let savedAccounts = readSavedAccounts();
 let motherAccounts = [];
 let addressRows = [];
@@ -23,6 +24,7 @@ const splitDomainInput = document.querySelector('#import-split-domain');
 const splitExcludeDomainInput = document.querySelector('#import-exclude-domains');
 let healthPollingTimer = null;
 let healthPollingInFlight = false;
+let motherSplitAccount = null;
 
 function notify(message, error = false) {
   toast.textContent = message;
@@ -78,7 +80,7 @@ function setAdminAuthenticated(authenticated) {
   document.querySelector('#admin-content').hidden = !authenticated;
   status.textContent = authenticated ? '验证成功，已在当前浏览器记住' : '请输入 data/admin.token';
   button.textContent = authenticated ? '重新验证' : '验证';
-  document.querySelectorAll('#import, #export, #refresh, #refresh-mothers, #copy-mother-routes, #query, #save-proxy-pool, #copy-routes, #copy-result')
+  document.querySelectorAll('#import, #export, #refresh, #refresh-mothers, #copy-mother-routes, #mother-child-select-all, #delete-selected-children, #query, #save-proxy-pool, #copy-routes, #copy-result')
     .forEach(control => { control.disabled = !authenticated; });
   if (!authenticated) {
     renderMotherAccounts([]);
@@ -111,6 +113,12 @@ async function authenticateAdmin() {
 function renderMotherAccounts(accounts) {
   const container = document.querySelector('#mother-accounts');
   const status = document.querySelector('#mother-list-status');
+  const selectAll = document.querySelector('#mother-child-select-all');
+  const deleteSelected = document.querySelector('#delete-selected-children');
+  selectAll.checked = false;
+  selectAll.indeterminate = false;
+  selectAll.disabled = true;
+  deleteSelected.disabled = true;
   if (!accounts.length) {
     container.innerHTML = '<div class="empty">暂无母号</div>';
     status.textContent = '共 0 个母号';
@@ -133,6 +141,7 @@ function renderMotherAccounts(accounts) {
         <div class="mother-children">
           ${children.length ? children.map(route => `
             <div class="mother-child-row">
+              <input class="mother-child-select" type="checkbox" aria-label="选择子号 ${escapeHtml(route.address)}" data-account-id="${escapeHtml(account.id)}" data-address="${escapeHtml(route.address)}">
               <span>${escapeHtml(route.address)}</span>
               <span class="route" title="${escapeHtml(route.url)}">${escapeHtml(route.url)}</span>
               <span class="mother-child-actions">
@@ -144,6 +153,10 @@ function renderMotherAccounts(accounts) {
         </div>
       </details>`;
   }).join('');
+  selectAll.disabled = !container.querySelector('.mother-child-select');
+  container.querySelectorAll('.mother-child-select').forEach(checkbox => {
+    checkbox.addEventListener('change', updateMotherChildSelection);
+  });
   container.querySelectorAll('.copy-child').forEach(button => button.addEventListener('click', async () => {
     if (!await copyText(`${button.dataset.address}----${button.dataset.url}`)) return;
     notify('子号和取码地址已复制');
@@ -157,62 +170,12 @@ function renderMotherAccounts(accounts) {
     if (!await copyText(lines.join('\n'))) return;
     notify(`已复制该母号及其 ${Math.max(0, lines.length - 1)} 个子号`);
   }));
-  container.querySelectorAll('.split-mother').forEach(button => button.addEventListener('click', async event => {
+  container.querySelectorAll('.split-mother').forEach(button => button.addEventListener('click', event => {
     event.preventDefault();
     event.stopPropagation();
     const account = motherAccounts.find(item => String(item.id) === button.dataset.accountId);
     if (!account) return;
-    const rawCount = window.prompt(`为 ${account.email} 创建几个子号？请输入 1-9：`, '1');
-    if (rawCount === null) return;
-    const count = Number(rawCount);
-    if (!Number.isInteger(count) || count < 1 || count > 9) return notify('分裂数量必须是 1-9', true);
-    const cachedDomains = localStorage.getItem(splitDomainStorageKey) || '';
-    const domain = window.prompt('指定域名（多个域名会随机选择；留空则下一步选择随机 .com/.net）：', cachedDomains);
-    if (domain === null) return;
-    let randomDomainTlds = [];
-    if (!domain.trim()) {
-      const rawTlds = window.prompt('随机域名后缀：输入 com、net 或 com,net：', 'com,net');
-      if (rawTlds === null) return;
-      randomDomainTlds = [...new Set(rawTlds.toLowerCase().split(/[\s,，]+/).map(value => value.replace(/^\./, '')).filter(Boolean))];
-      if (!randomDomainTlds.length || randomDomainTlds.some(value => !['com', 'net'].includes(value))) {
-        return notify('随机域名后缀只能填写 com、net 或 com,net', true);
-      }
-    }
-    const cachedExcludes = localStorage.getItem(splitExcludeDomainStorageKey) || '';
-    const excludeDomains = window.prompt('排除域名（可留空，多个用逗号分隔）：', cachedExcludes);
-    if (excludeDomains === null) return;
-    if (domain.trim()) {
-      splitDomainInput.value = domain.trim();
-      saveSplitDomains();
-    } else {
-      splitDomainInput.value = '';
-      saveSplitDomains();
-    }
-    splitExcludeDomainInput.value = excludeDomains.trim();
-    saveSplitExcludeDomains();
-    button.disabled = true;
-    try {
-      const result = await request('/admin/aliases/split', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({
-          email: account.email,
-          password: account.password,
-          count,
-          ...(domain.trim() ? {domain: domain.trim()} : {}),
-          ...(randomDomainTlds.length ? {random_domain_tlds: randomDomainTlds} : {}),
-          ...(excludeDomains.trim() ? {exclude_domains: excludeDomains.trim()} : {}),
-        }),
-      });
-      motherPage = 1;
-      addressPage = 1;
-      await Promise.all([refreshMotherAccounts(false), refreshAddressRows(false)]);
-      notify(`已为 ${account.email} 创建 ${result.created || 0} 个子号`);
-    } catch (error) {
-      notify(error.message, true);
-    } finally {
-      button.disabled = false;
-    }
+    openMotherSplitDialog(account);
   }));
   container.querySelectorAll('.delete-child').forEach(button => button.addEventListener('click', async event => {
     event.preventDefault();
@@ -267,6 +230,55 @@ function renderMotherAccounts(accounts) {
     0,
   );
   status.textContent = `共 ${accounts.length} 个母号，${childCount} 个子号`;
+}
+
+function updateMotherChildSelection() {
+  const checkboxes = [...document.querySelectorAll('#mother-accounts .mother-child-select')];
+  const selectedCount = checkboxes.filter(checkbox => checkbox.checked).length;
+  const selectAll = document.querySelector('#mother-child-select-all');
+  const deleteSelected = document.querySelector('#delete-selected-children');
+  selectAll.disabled = checkboxes.length === 0;
+  selectAll.checked = checkboxes.length > 0 && selectedCount === checkboxes.length;
+  selectAll.indeterminate = selectedCount > 0 && selectedCount < checkboxes.length;
+  deleteSelected.disabled = selectedCount === 0;
+  deleteSelected.textContent = selectedCount ? `删除选中子号 (${selectedCount})` : '删除选中子号';
+}
+
+function openMotherSplitDialog(account) {
+  const childCount = (account.addresses || []).filter(route => !route.is_primary).length;
+  const remaining = Math.max(0, 9 - childCount);
+  if (!remaining) return notify('该母号已有 9 个子号，不能继续分裂', true);
+
+  motherSplitAccount = account;
+  document.querySelector('#mother-split-account').textContent = account.email;
+  document.querySelector('#mother-split-capacity').textContent = `还可创建 ${remaining} 个`;
+  const count = document.querySelector('#mother-split-count');
+  count.innerHTML = Array.from({length: remaining}, (_, index) =>
+    `<option value="${index + 1}">${index + 1} 个</option>`).join('');
+  let cachedConfig = {};
+  try {
+    cachedConfig = JSON.parse(localStorage.getItem(motherSplitConfigStorageKey) || '{}');
+  } catch {}
+  count.value = String(Math.min(remaining, Math.max(1, Number(cachedConfig.count) || 1)));
+  document.querySelector('#mother-split-domains').value =
+    localStorage.getItem(splitDomainStorageKey) || splitDomainInput.value.trim();
+  document.querySelector('#mother-split-excludes').value =
+    localStorage.getItem(splitExcludeDomainStorageKey) || splitExcludeDomainInput.value.trim();
+  const cachedTlds = Array.isArray(cachedConfig.randomDomainTlds) ? cachedConfig.randomDomainTlds : null;
+  const randomCom = cachedTlds ? cachedTlds.includes('com') : document.querySelector('#random-com-domain').checked;
+  const randomNet = cachedTlds ? cachedTlds.includes('net') : document.querySelector('#random-net-domain').checked;
+  const hasSpecifiedDomains = Boolean(document.querySelector('#mother-split-domains').value.trim());
+  document.querySelector('#mother-split-random-com').checked = randomCom || (!hasSpecifiedDomains && !randomCom && !randomNet);
+  document.querySelector('#mother-split-random-net').checked = randomNet || (!hasSpecifiedDomains && !randomCom && !randomNet);
+  document.querySelector('#mother-split-status').textContent = '';
+  const dialog = document.querySelector('#mother-split-dialog');
+  if (!dialog.open) dialog.showModal();
+}
+
+function closeMotherSplitDialog() {
+  const dialog = document.querySelector('#mother-split-dialog');
+  if (dialog.open) dialog.close();
+  motherSplitAccount = null;
 }
 
 async function refreshMotherAccounts(showNotice = true) {
@@ -853,6 +865,128 @@ document.querySelector('#copy-mother-routes').addEventListener('click', async ()
   if (!lines.length) return notify('当前页没有可复制的母号或子号', true);
   if (!await copyText(lines.join('\n'))) return;
   notify(`已复制当前页 ${lines.length} 条母号和子号地址`);
+});
+
+document.querySelector('#mother-child-select-all').addEventListener('change', event => {
+  document.querySelectorAll('#mother-accounts .mother-child-select').forEach(checkbox => {
+    checkbox.checked = event.target.checked;
+  });
+  updateMotherChildSelection();
+});
+
+document.querySelector('#delete-selected-children').addEventListener('click', async event => {
+  const button = event.currentTarget;
+  const selected = [...document.querySelectorAll('#mother-accounts .mother-child-select:checked')]
+    .map(checkbox => ({
+      accountId: checkbox.dataset.accountId,
+      address: checkbox.dataset.address,
+    }));
+  if (!selected.length) return notify('请先勾选需要删除的子号', true);
+  if (!confirm(`确定删除选中的 ${selected.length} 个子号吗？此操作会同时从 mail.com 删除。`)) return;
+
+  button.disabled = true;
+  document.querySelector('#mother-child-select-all').disabled = true;
+  document.querySelectorAll('#mother-accounts .mother-child-select, #mother-accounts .delete-child')
+    .forEach(control => { control.disabled = true; });
+  let deleted = 0;
+  const failures = [];
+  for (const [index, item] of selected.entries()) {
+    button.textContent = `正在删除 ${index + 1}/${selected.length}`;
+    try {
+      await request('/admin/aliases/delete', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({account: item.accountId, address: item.address}),
+      });
+      deleted += 1;
+      const account = motherAccounts.find(row => String(row.id) === item.accountId);
+      savedAccounts.forEach(row => {
+        if (row.email === account?.email) {
+          row.addresses = row.addresses.filter(route => route.address !== item.address);
+        }
+      });
+    } catch (error) {
+      failures.push(`${item.address}: ${error.message}`);
+    }
+  }
+  saveAccounts(savedAccounts);
+  await Promise.all([refreshMotherAccounts(false), refreshAddressRows(false)]);
+  if (failures.length) {
+    notify(`已删除 ${deleted} 个，失败 ${failures.length} 个：${failures[0]}`, true);
+  } else {
+    notify(`已删除 ${deleted} 个子号`);
+  }
+});
+
+document.querySelector('#mother-split-close').addEventListener('click', closeMotherSplitDialog);
+document.querySelector('#mother-split-cancel').addEventListener('click', closeMotherSplitDialog);
+document.querySelector('#mother-split-dialog').addEventListener('close', () => {
+  motherSplitAccount = null;
+});
+document.querySelector('#mother-split-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  const account = motherSplitAccount;
+  if (!account) return;
+  const count = Number(document.querySelector('#mother-split-count').value);
+  const domain = document.querySelector('#mother-split-domains').value.trim();
+  const excludeDomains = document.querySelector('#mother-split-excludes').value.trim();
+  const randomDomainTlds = [
+    document.querySelector('#mother-split-random-com').checked ? 'com' : '',
+    document.querySelector('#mother-split-random-net').checked ? 'net' : '',
+  ].filter(Boolean);
+  const status = document.querySelector('#mother-split-status');
+  if (!domain && !randomDomainTlds.length) {
+    status.textContent = '请填写指定域名，或至少选择一个随机后缀';
+    return;
+  }
+
+  // 母号列表与导入区域共用同一份持久化配置，下次打开无需重新填写。
+  splitDomainInput.value = domain;
+  splitExcludeDomainInput.value = excludeDomains;
+  document.querySelector('#random-com-domain').checked = randomDomainTlds.includes('com');
+  document.querySelector('#random-net-domain').checked = randomDomainTlds.includes('net');
+  saveSplitDomains();
+  saveSplitExcludeDomains();
+  localStorage.setItem(motherSplitConfigStorageKey, JSON.stringify({count, randomDomainTlds}));
+
+  const submit = document.querySelector('#mother-split-submit');
+  const cancel = document.querySelector('#mother-split-cancel');
+  const close = document.querySelector('#mother-split-close');
+  submit.disabled = true;
+  cancel.disabled = true;
+  close.disabled = true;
+  status.textContent = `正在创建 ${count} 个子号...`;
+  try {
+    const result = await request('/admin/aliases/split', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        email: account.email,
+        password: account.password,
+        count,
+        ...(domain ? {domain} : {}),
+        ...(!domain && randomDomainTlds.length ? {random_domain_tlds: randomDomainTlds} : {}),
+        ...(excludeDomains ? {exclude_domains: excludeDomains} : {}),
+      }),
+    });
+    const createdRoutes = (result.routes || []).map(route => ({address: route.address, url: route.url}));
+    const saved = savedAccounts.find(item => item.email === account.email);
+    if (saved) {
+      const existing = new Set(saved.addresses.map(route => route.address));
+      saved.addresses.push(...createdRoutes.filter(route => !existing.has(route.address)));
+      saveAccounts(savedAccounts);
+    }
+    closeMotherSplitDialog();
+    await Promise.all([refreshMotherAccounts(false), refreshAddressRows(false)]);
+    notify(`已为 ${account.email} 创建 ${result.created || createdRoutes.length} 个子号`);
+  } catch (error) {
+    status.textContent = error.message;
+    notify(error.message, true);
+  } finally {
+    submit.disabled = false;
+    cancel.disabled = false;
+    close.disabled = false;
+  }
 });
 
 document.querySelector('#admin-login').addEventListener('click', authenticateAdmin);

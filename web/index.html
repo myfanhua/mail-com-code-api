@@ -114,6 +114,8 @@
         <div><span class="section-kicker">04 / PARENTS</span><h3>母号列表</h3></div>
         <div class="inline-actions">
           <span id="mother-list-status" class="muted">尚未加载</span>
+          <label class="mother-child-select-all-label"><input id="mother-child-select-all" type="checkbox"> 全选本页子号</label>
+          <button id="delete-selected-children" class="button danger" disabled>删除选中子号</button>
           <button id="copy-mother-routes" class="button secondary">复制本页母号和子号</button>
           <button id="refresh-mothers" class="button secondary">刷新母号</button>
         </div>
@@ -155,6 +157,39 @@
     </section>
     </div>
   </main>
+
+  <dialog id="mother-split-dialog" class="config-dialog">
+    <form id="mother-split-form">
+      <div class="dialog-head">
+        <div><span class="section-kicker">SPLIT ADDRESS</span><h3>分裂子号</h3></div>
+        <button id="mother-split-close" class="dialog-close" type="button" aria-label="关闭">×</button>
+      </div>
+      <p class="dialog-account">母号：<strong id="mother-split-account"></strong> <span id="mother-split-capacity" class="muted"></span></p>
+      <div class="dialog-fields">
+        <label>分裂数量
+          <select id="mother-split-count"></select>
+        </label>
+        <label>指定域名
+          <input id="mother-split-domains" type="text" placeholder="engineer.com, comic.com">
+          <small>可填写多个，创建时随机选择；填写后优先使用指定域名。</small>
+        </label>
+        <fieldset>
+          <legend>未指定域名时随机选择</legend>
+          <label><input id="mother-split-random-com" type="checkbox"> .com</label>
+          <label><input id="mother-split-random-net" type="checkbox"> .net</label>
+        </fieldset>
+        <label>排除域名
+          <input id="mother-split-excludes" type="text" placeholder="email.com, usa.com">
+          <small>多个域名使用逗号分隔。</small>
+        </label>
+      </div>
+      <div class="dialog-actions">
+        <span id="mother-split-status" class="muted"></span>
+        <button id="mother-split-cancel" class="button secondary" type="button">取消</button>
+        <button id="mother-split-submit" class="button primary" type="submit">开始分裂</button>
+      </div>
+    </form>
+  </dialog>
 
   <div id="toast" class="toast" role="status"></div>
   <script src="/app.js"></script>
