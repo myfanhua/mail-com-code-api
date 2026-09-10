@@ -25,16 +25,16 @@ chmod +x service.sh
 ./service.sh stop
 ```
 
-服务默认监听 `127.0.0.1:8988`，使用 `.venv/bin/python`（不存在时使用 `python3`），自动读取项目根目录下的 `.env`，PID 保存在 `.run/server.pid`，标准输出和错误输出统一写入 `logs/server.log`。持续查看日志可运行 `./service.sh logs`。
+服务默认监听所有网卡的 `8988` 端口，使用 `.venv/bin/python`（不存在时使用 `python3`），自动读取项目根目录下的 `.env`，PID 保存在 `.run/server.pid`，标准输出和错误输出统一写入 `logs/server.log`。持续查看日志可运行 `./service.sh logs`。部署到服务器时应把 `MAIL_API_PUBLIC_BASE` 设置为实际域名或 `http://服务器IP:8988`。
 
 Windows PowerShell 也可以直接启动：
 
 ```powershell
 cd D:\grokfree\mail-com-code-api
 & D:\grokfree\.venv\Scripts\python.exe server.py `
-  --bind 127.0.0.1 `
-  --port 8788 `
-  --public-base http://127.0.0.1:8788 `
+  --bind 0.0.0.0 `
+  --port 8988 `
+  --public-base http://127.0.0.1:8988 `
   --data-dir .\data
 ```
 
@@ -58,7 +58,7 @@ second@mail.com----password-2----http://proxy-user:proxy-pass@proxy.example:8080
 '@
 $token = Get-Content .\data\admin.token -Raw
 Invoke-RestMethod -Method Post `
-  -Uri 'http://127.0.0.1:8788/admin/import?verify=true&sync_aliases=true' `
+  -Uri 'http://127.0.0.1:8988/admin/import?verify=true&sync_aliases=true' `
   -Headers @{Authorization = "Bearer $($token.Trim())"} `
   -ContentType 'text/plain; charset=utf-8' `
   -Body $body
@@ -204,10 +204,10 @@ HAR 没有显示 token 绑定 IP 的字段；同一 `sid` 可按 scope 换不同
 cp .env.example .env
 # 修改 .env 中的 PUBLIC_BASE、ADMIN_TOKEN 和 MASTER_KEY
 docker compose up -d --build
-curl http://127.0.0.1:8788/health
+curl http://127.0.0.1:8988/health
 ```
 
-容器端口只映射到 loopback。生产环境用 Caddy/Nginx 或 Cloudflare Tunnel 提供 HTTPS，不要把 `8788` 裸露到公网。
+容器端口映射到服务器的 `8988`。可以直接通过 `http://服务器IP:8988` 访问，生产环境也可使用 Caddy/Nginx 或 Cloudflare Tunnel 提供 HTTPS。
 
 ## 验证
 

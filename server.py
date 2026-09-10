@@ -1286,9 +1286,9 @@ def build_server(args: argparse.Namespace) -> ThreadingHTTPServer:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="mail.com 邮箱接码 API")
-    parser.add_argument("--bind", default=os.environ.get("MAIL_API_BIND", "127.0.0.1"))
-    parser.add_argument("--port", type=int, default=int(os.environ.get("MAIL_API_PORT", "8788")))
-    parser.add_argument("--public-base", default=os.environ.get("MAIL_API_PUBLIC_BASE", "http://127.0.0.1:8788"))
+    parser.add_argument("--bind", default=os.environ.get("MAIL_API_BIND", "0.0.0.0"))
+    parser.add_argument("--port", type=int, default=int(os.environ.get("MAIL_API_PORT", "8988")))
+    parser.add_argument("--public-base", default=os.environ.get("MAIL_API_PUBLIC_BASE", "http://127.0.0.1:8988"))
     parser.add_argument("--data-dir", default=os.environ.get("MAIL_API_DATA_DIR", "./data"))
     parser.add_argument("--upstream-timeout", type=float, default=float(os.environ.get("MAIL_API_UPSTREAM_TIMEOUT", "25")))
     parser.add_argument("--rate-limit", type=int, default=int(os.environ.get("MAIL_API_RATE_LIMIT", "30")))

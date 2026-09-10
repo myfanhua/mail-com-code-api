@@ -6,11 +6,10 @@ services:
     volumes:
       - ./data:/data
     ports:
-      - "127.0.0.1:8788:8788"
+      - "8988:8988"
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8788/health', timeout=3)"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8988/health', timeout=3)"]
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 10s
-
